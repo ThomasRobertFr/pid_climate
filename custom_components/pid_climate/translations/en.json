@@ -1,0 +1,48 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "Reapplied the YAML block for this room.",
+      "yaml_only": "PID Climate is configured in YAML, under the climate: platform key. There is nothing to set up here."
+    }
+  },
+  "services": {
+    "reload": {
+      "name": "Reload",
+      "description": "Re-read the pid_climate blocks from configuration.yaml and apply any changes, without restarting Home Assistant. Rooms whose config is unchanged are left running; only edited ones reload."
+    },
+    "set_integral": {
+      "name": "Set integral",
+      "description": "Force the integral term for one mode. A diagnostic escape hatch: if you need it regularly, the mode's offset is wrong.",
+      "fields": {
+        "value": {
+          "name": "Value",
+          "description": "Integral value, in degrees of command."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Which mode's integral to set. Defaults to the active mode."
+        }
+      }
+    },
+    "reset_integral": {
+      "name": "Reset integral",
+      "description": "Zero the integral for one mode, or for all modes if none is given.",
+      "fields": {
+        "mode": {
+          "name": "Mode",
+          "description": "Which mode's integral to reset. Defaults to all modes."
+        }
+      }
+    },
+    "clear_hold": {
+      "name": "Clear hold",
+      "description": "Drop any outstanding target-change hold so integration resumes immediately, instead of waiting out the remaining time.",
+      "fields": {
+        "mode": {
+          "name": "Mode",
+          "description": "Which mode's hold to clear. Defaults to all modes."
+        }
+      }
+    }
+  }
+}
