@@ -157,6 +157,14 @@ capitalisation included, or writes will fail silently.
 *Reset integral* and *Clear hold*, both acting on the active mode — or on every
 mode while the entity is off, since there is no active one to pick.
 
+*Force update* runs one control cycle immediately instead of waiting out
+`sampling_period`, and writes the resulting setpoint without waiting out
+`min_setpoint_interval` — the same exemption a target change gets, since both are
+explicit manual actions. A redundant write is still suppressed, so pressing it on a
+settled loop only refreshes the diagnostics. It does nothing while the entity is
+`off` or in `fan_only`, where no loop runs. Useful after a tuning reload, or to see
+the effect of a change without watching the clock.
+
 **Diagnostic entities** (`entity_category: diagnostic`, on the room's device)
 
 `error`, `pid_p`, `pid_i`, `pid_e`, `setpoint_raw` (pre-rounding, pre-clamp),
@@ -505,6 +513,8 @@ restart cannot integrate across the downtime.
 
 Two **button** entities on each device run the last two against the active mode
 (or against every mode while the entity is off): *Reset integral* and *Clear hold*.
+A third, *Force update*, has no service behind it: it runs a control cycle on the
+spot (§2), so a change can be evaluated without waiting for `sampling_period`.
 
 ## 9. Configuration
 

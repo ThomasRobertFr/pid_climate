@@ -1,8 +1,11 @@
-"""One-click versions of the two manual interventions worth having on the device.
+"""One-click versions of the manual interventions worth having on the device.
 
-Both act on the **active mode**, or on every mode while the entity is off, since
-there is no active one to pick. That falls out of passing `active_mode` straight
-through: the services read `None` as "all modes".
+*Reset integral* and *Clear hold* act on the **active mode**, or on every mode
+while the entity is off, since there is no active one to pick. That falls out of
+passing `active_mode` straight through: the services read `None` as "all modes".
+
+*Force update* takes no mode: it runs the loop for whichever mode is active, and
+is a no-op while off or in `fan_only`, where there is no loop to run.
 """
 
 from __future__ import annotations
@@ -40,6 +43,12 @@ BUTTONS: tuple[PidButtonDescription, ...] = (
         key="clear_hold",
         name="clear hold",
         press=lambda pid: pid.async_clear_hold(pid.active_mode),
+    ),
+    PidButtonDescription(
+        key="force_update",
+        name="force update",
+        icon="mdi:refresh",
+        press=lambda pid: pid.async_force_control(),
     ),
 )
 

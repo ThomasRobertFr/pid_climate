@@ -656,6 +656,20 @@ class PidClimate(ClimateEntity, RestoreEntity):
         self._pi.clear_hold(mode)
         self._publish()
 
+    async def async_force_control(self) -> None:
+        """Run one control cycle now, instead of waiting out the sampling period.
+
+        `force=True` for the same reason a target change uses it: an explicit
+        manual action should land now rather than at the end of the rate limit. A
+        redundant write is still suppressed, so pressing this on a settled loop
+        costs nothing but a fresh sample.
+
+        The periodic timer keeps its own schedule; only `dt` shortens for the next
+        tick, and since integration is `ki * error * dt` an extra sample merely
+        splits the interval rather than adding to the integral.
+        """
+        await self._async_control(force=True)
+
     # -- the loop ---------------------------------------------------------
 
     @callback
