@@ -146,7 +146,7 @@ class ModeConfig:
     # output. Integers: the AC reports and accepts whole degrees.
     ac_modulation_lower_margin: int = -1   # below this it is idle
     ac_modulation_upper_margin: int = 3    # above this it is flat out
-    overheat_protection: bool = True
+    overheat_protection: bool = False
     integral_band: float = 0.0         # integrate only within this; 0 disables
     hold_base: float = 0.0             # s, target-change hold
     hold_per_degree: float = 2700.0    # s per degC of accumulated change

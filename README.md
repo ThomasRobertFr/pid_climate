@@ -386,10 +386,12 @@ than counting down.
 
 Set `per_degree: 0` and `base: '01:00:00'` for a flat one-hour hold instead.
 
-### 5.4 Overheat protection
+### 5.4 Overheat protection (optional, per mode, default off)
 
 Per mode, VTherm's mechanism: when `error` changes sign between cycles, halve the
-integral. Independent of the holds above.
+integral. Independent of the holds above. Off by default: crossing the target is
+the normal end of an approach, not evidence that the accumulated bias was wrong,
+so halving there discards a term the loop then has to earn back.
 
 ### 5.5 Never reset on target change
 

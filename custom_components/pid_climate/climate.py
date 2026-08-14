@@ -82,7 +82,7 @@ MODE_SCHEMA = vol.Schema(
         vol.Optional(c.CONF_INTEGRAL_MAX, default=4.0): vol.Coerce(float),
         vol.Optional(c.CONF_AC_MOD_LOWER, default=-1): vol.Coerce(int),
         vol.Optional(c.CONF_AC_MOD_UPPER, default=3): vol.Coerce(int),
-        vol.Optional(c.CONF_OVERHEAT_PROTECTION, default=True): cv.boolean,
+        vol.Optional(c.CONF_OVERHEAT_PROTECTION, default=False): cv.boolean,
         vol.Optional(c.CONF_INTEGRAL_BAND, default=0.0): vol.Coerce(float),
         vol.Optional(c.CONF_HOLD_BASE, default=timedelta()): cv.time_period,
         vol.Optional(

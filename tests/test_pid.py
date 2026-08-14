@@ -350,7 +350,7 @@ def test_hold_applies_only_to_its_own_mode():
 
 def test_overheat_protection_halves_on_sign_change():
     # ki=0 isolates the halving from this cycle's own contribution.
-    pi = build(COOL, ki=0.0)
+    pi = build(COOL, ki=0.0, overheat_protection=True)
     pi.set_integral(COOL, 2.0)
     warm_up(pi, COOL, room=24.0, target=23.0, internal=24.0, ac_setpoint=22.0)
     r = cycle(pi, COOL, room=22.0, target=23.0, now=300.0,
