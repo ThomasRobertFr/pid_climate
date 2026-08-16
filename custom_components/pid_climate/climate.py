@@ -594,7 +594,10 @@ class PidClimate(ClimateEntity, RestoreEntity):
         # Re-decided on the next cycle; None forces the mode write either way.
         self._auto_off = False
         self._auto_off_applied = None
-        self.async_write_ha_state()
+        # Published, not just written: off and fan_only return below without ever
+        # running a control cycle, so this is the only chance the diagnostics get
+        # to hear that the loop stopped.
+        self._publish()
 
         if hvac_mode in (HVACMode.OFF, HVACMode.FAN_ONLY):
             # Neither regulates. Hand the mode over once and stop writing
@@ -964,7 +967,9 @@ class PidClimate(ClimateEntity, RestoreEntity):
         elif self._blocked is not None:
             _LOGGER.info("%s: control resumed", self.entity_id)
         self._blocked = reason
-        self.async_write_ha_state()
+        # A blocked cycle returns before `_publish`, so dispatch here or the
+        # `hold_reason` sensor keeps reporting the last cycle that did run.
+        self._publish()
 
     def _publish(self) -> None:
         self.async_write_ha_state()
