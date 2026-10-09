@@ -32,6 +32,7 @@ UNIT_FULL_POWER = "full_power"
 HOLD_NO_DT = "no_time_delta"
 HOLD_STALE = "sample_gap_too_long"
 HOLD_TARGET_CHANGE = "target_change_hold"
+HOLD_AUTO_OFF = "auto_off"
 HOLD_UNIT_IDLE = "unit_idle"
 HOLD_UNIT_FULL_POWER = "unit_full_power"
 HOLD_COMMAND_SATURATED = "command_saturated"
@@ -63,6 +64,19 @@ def command_range(
     return command_min, command_max
 
 
+def _half_step(command_step: float) -> float:
+    return command_step / 2 if command_step > 0 else 0.0
+
+
+def heat_auto_off_edge(command_min: float, command_step: float) -> float:
+    """Lowest heating `raw` that still rounds to a valid command.
+
+    round_to_step rounds half away from zero, so `command_min - step/2` still
+    rounds to `command_min`; anything below it is where heating auto-off fires.
+    """
+    return command_min - _half_step(command_step)
+
+
 def auto_off_wanted(
     *,
     mode: str,
@@ -71,6 +85,7 @@ def auto_off_wanted(
     command_max: float,
     margin: float,
     currently_off: bool,
+    command_step: float = 0.0,
 ) -> bool:
     """Should the unit be stopped because the command left its usable range?
 
@@ -78,14 +93,24 @@ def auto_off_wanted(
     asking for less output than the unit's gentlest setting can deliver. Sitting at
     that setting anyway just overshoots; stopping is the honest action.
 
+    The boundary is where the *rounded* command leaves the range, i.e. half a step
+    beyond `command_min`/`command_max`: a raw of 16.6 is written as 17 with a step
+    of 1, which is a valid command, not a reason to stop. Evaluated on `raw` rather
+    than on the clamped command, which by definition can never leave the range.
+
     `margin` is one-sided hysteresis on the way back. The command has to climb
     `margin` past the boundary before the unit restarts, so a command hovering on
-    the edge cannot flap the compressor. Note this is evaluated on `raw`, not on
-    the rounded and clamped command, which by definition can never leave the range.
+    the edge cannot flap the compressor.
     """
     if mode == HEAT:
-        return raw < (command_min + margin if currently_off else command_min)
-    return raw > (command_max - margin if currently_off else command_max)
+        edge = heat_auto_off_edge(command_min, command_step)
+        return raw < (edge + margin if currently_off else edge)
+    # Mirror image, except max + half rounds *past* max, hence >= with a step.
+    half = _half_step(command_step)
+    edge = command_max + half
+    if currently_off:
+        return raw > edge - margin
+    return raw >= edge if half else raw > edge
 
 
 def eight_deg_state(
@@ -298,7 +323,13 @@ class ModeAwarePI:
         internal: float | None = None,
         ac_setpoint: float | None = None,
         command_step: float = 1.0,
+        auto_off_active: bool = False,
     ) -> Result:
+        """One control cycle.
+
+        `auto_off_active` says the unit is currently stopped by auto-off (README
+        6.4), which only the caller knows: it decides that from this cycle's `raw`.
+        """
         cfg = self._config[mode]
         state = self._state[mode]
 
@@ -345,6 +376,8 @@ class ModeAwarePI:
             dt=dt,
             now=now,
             unit_state=unit_state,
+            command_step=command_step,
+            auto_off_active=auto_off_active,
         )
 
         if hold is None:
@@ -414,6 +447,8 @@ class ModeAwarePI:
         dt: float,
         now: float,
         unit_state: str,
+        command_step: float,
+        auto_off_active: bool,
     ) -> str | None:
         if dt <= 0:
             return HOLD_NO_DT
@@ -429,7 +464,17 @@ class ModeAwarePI:
         wants_more = error > 0 if mode == HEAT else error < 0
         wants_less = error < 0 if mode == HEAT else error > 0
 
-        if unit_state == UNIT_IDLE and wants_less:
+        # Heating with auto-off: "idle" is not the end of the less-output axis.
+        # The coil keeps leaking heat into the room while the fan is stopped
+        # (README 1), and stopping the unit is one more step past idle. So keep
+        # integrating down until auto-off fires, and only then hold -- the stopped
+        # unit really does deliver nothing. Heat only: an idle cooling unit gives
+        # out no cooling, so there is nothing to chase.
+        heat_auto_off = mode == HEAT and cfg.auto_off
+        if heat_auto_off and auto_off_active and wants_less:
+            return HOLD_AUTO_OFF
+
+        if unit_state == UNIT_IDLE and wants_less and not heat_auto_off:
             return HOLD_UNIT_IDLE
 
         # Idle and we want more output is deliberately NOT held. Raising the
@@ -440,10 +485,13 @@ class ModeAwarePI:
         if unit_state == UNIT_FULL_POWER and wants_more:
             return HOLD_UNIT_FULL_POWER
 
-        # Fallback for when the unit's reading is unavailable: our own clamp.
+        # Fallback for when the unit's reading is unavailable: our own clamp. With
+        # heating auto-off the floor is where auto-off fires, not `low`, or the
+        # integral would stop half a step short of it.
+        floor = heat_auto_off_edge(low, command_step) if heat_auto_off else low
         if raw > high and error > 0:
             return HOLD_COMMAND_SATURATED
-        if raw < low and error < 0:
+        if raw < floor and error < 0:
             return HOLD_COMMAND_SATURATED
 
         # NOT a classic deadband, which is a neutral zone *around* the setpoint

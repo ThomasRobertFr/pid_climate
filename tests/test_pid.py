@@ -23,7 +23,7 @@ UNIT_UNKNOWN, UNIT_IDLE = _pid.UNIT_UNKNOWN, _pid.UNIT_IDLE
 UNIT_MODULATING, UNIT_FULL_POWER = _pid.UNIT_MODULATING, _pid.UNIT_FULL_POWER
 HOLD_NO_DT, HOLD_STALE = _pid.HOLD_NO_DT, _pid.HOLD_STALE
 HOLD_TARGET_CHANGE, HOLD_CLAMPED = _pid.HOLD_TARGET_CHANGE, _pid.HOLD_CLAMPED
-HOLD_UNIT_IDLE = _pid.HOLD_UNIT_IDLE
+HOLD_UNIT_IDLE, HOLD_AUTO_OFF = _pid.HOLD_UNIT_IDLE, _pid.HOLD_AUTO_OFF
 HOLD_UNIT_FULL_POWER = _pid.HOLD_UNIT_FULL_POWER
 HOLD_COMMAND_SATURATED = _pid.HOLD_COMMAND_SATURATED
 HOLD_OUTSIDE_BAND = _pid.HOLD_OUTSIDE_BAND
@@ -42,11 +42,12 @@ def build(mode=COOL, **overrides):
 
 
 def cycle(pi, mode, *, room, target, now, internal=None, ac_setpoint=None,
-          resolve=NO_EIGHT_DEG, outdoor=None):
+          resolve=NO_EIGHT_DEG, outdoor=None, auto_off_active=False):
     low, high = resolve
     return pi.step(mode=mode, room=room, target=target, now=now,
                    command_min=low, command_max=high, internal=internal,
-                   ac_setpoint=ac_setpoint, outdoor=outdoor, command_step=1)
+                   ac_setpoint=ac_setpoint, outdoor=outdoor, command_step=1,
+                   auto_off_active=auto_off_active)
 
 
 def warm_up(pi, mode, *, room, target, internal=None, ac_setpoint=None,
@@ -402,22 +403,115 @@ def test_eight_deg_switch_follows_the_rounded_command():
 
 
 def test_auto_off_triggers_below_the_heating_floor():
-    kw = dict(command_min=17.0, command_max=30.0, margin=0.5)
+    kw = dict(command_min=17.0, command_max=30.0, margin=0.5, command_step=1.0)
     # Evaluated on raw, which is the only value that can leave the range.
     assert auto_off_wanted(mode=HEAT, raw=16.4, currently_off=False, **kw) is True
     assert auto_off_wanted(mode=HEAT, raw=17.2, currently_off=False, **kw) is False
-    # Hysteresis: once off, raw must climb past 17.5 to restart.
+    # Anything that still rounds to 17 is a valid command, not a reason to stop.
+    assert auto_off_wanted(mode=HEAT, raw=16.91, currently_off=False, **kw) is False
+    assert auto_off_wanted(mode=HEAT, raw=16.5, currently_off=False, **kw) is False
+    # Hysteresis: once off, raw must climb back to 17.0 so the restart writes 17.
+    assert auto_off_wanted(mode=HEAT, raw=16.9, currently_off=True, **kw) is True
+    assert auto_off_wanted(mode=HEAT, raw=17.0, currently_off=True, **kw) is False
+    # Without a step there is no rounding, so the boundary is command_min itself.
+    kw["command_step"] = 0.0
+    assert auto_off_wanted(mode=HEAT, raw=16.91, currently_off=False, **kw) is True
     assert auto_off_wanted(mode=HEAT, raw=17.2, currently_off=True, **kw) is True
     assert auto_off_wanted(mode=HEAT, raw=17.6, currently_off=True, **kw) is False
 
 
 def test_auto_off_triggers_above_the_cooling_ceiling():
-    kw = dict(command_min=17.0, command_max=30.0, margin=0.5)
+    kw = dict(command_min=17.0, command_max=30.0, margin=0.5, command_step=1.0)
     # The summer case: target 26 with the room at 23 drives raw past 30.
     assert auto_off_wanted(mode=COOL, raw=33.0, currently_off=False, **kw) is True
     assert auto_off_wanted(mode=COOL, raw=29.0, currently_off=False, **kw) is False
-    assert auto_off_wanted(mode=COOL, raw=29.8, currently_off=True, **kw) is True
-    assert auto_off_wanted(mode=COOL, raw=29.4, currently_off=True, **kw) is False
+    # 30.4 is still written as 30; 30.5 rounds away from zero to 31.
+    assert auto_off_wanted(mode=COOL, raw=30.4, currently_off=False, **kw) is False
+    assert auto_off_wanted(mode=COOL, raw=30.5, currently_off=False, **kw) is True
+    # Once off, raw must drop back to 30.0 so the restart writes 30.
+    assert auto_off_wanted(mode=COOL, raw=30.1, currently_off=True, **kw) is True
+    assert auto_off_wanted(mode=COOL, raw=30.0, currently_off=True, **kw) is False
+
+
+def _leaking_overshoot(pi, cycles):
+    """Heat, room 0.5 over target, unit idle by its leak-inflated reading.
+
+    raw = 18.5 - 2.5 + 2*(-0.5) + I = 15.0 + I, so I = 2.0 starts it at 17.0.
+    """
+    pi.set_integral(HEAT, 2.0)
+    kw = dict(room=19.0, target=18.5, internal=35.0, ac_setpoint=17.0)
+    warm_up(pi, HEAT, **kw)
+    now, results = 0.0, []
+    for _ in range(cycles):
+        now += 300.0
+        results.append(cycle(pi, HEAT, now=now, **kw))
+    return results
+
+
+def test_heating_auto_off_integrates_through_idle_down_to_the_edge():
+    """The coil leaks heat while idle, so idle is not the end of the line.
+
+    Without auto-off the idle hold freezes the integral and the unit sits at 17,
+    still leaking into a room that is already too warm. With it, the integral keeps
+    pulling raw down until auto-off can fire, then saturation freezes it there.
+    """
+    held = _leaking_overshoot(build(HEAT), cycles=12)
+    assert all(r.hold_reason == HOLD_UNIT_IDLE for r in held)
+    assert held[-1].i == 2.0 and held[-1].raw == 17.0
+
+    rs = _leaking_overshoot(build(HEAT, auto_off=True), cycles=12)
+    assert rs[0].unit_state == UNIT_IDLE and rs[0].integrating, rs[0].hold_reason
+    crossed = next(i for i, r in enumerate(rs) if r.raw < 16.5)
+    assert all(r.integrating for r in rs[:crossed + 1])
+    # Past the edge auto-off fires, and integrating further would be windup.
+    after = rs[crossed + 1:]
+    assert after and all(r.hold_reason == HOLD_COMMAND_SATURATED for r in after)
+    assert {r.i for r in after} == {rs[crossed].i}
+    assert auto_off_wanted(mode=HEAT, raw=rs[-1].raw, command_min=17.0,
+                           command_max=30.0, margin=0.5, currently_off=False,
+                           command_step=1.0)
+
+
+def test_heating_auto_off_saturates_at_the_edge_without_a_reading():
+    """The fallback clamp must not stop half a step short of auto-off."""
+    pi = build(HEAT, auto_off=True)
+    pi.set_integral(HEAT, 1.8)                  # raw 16.8: still written as 17
+    warm_up(pi, HEAT, room=19.0, target=18.5)
+    r = cycle(pi, HEAT, room=19.0, target=18.5, now=300.0)
+    assert r.unit_state == UNIT_UNKNOWN
+    assert r.integrating, r.hold_reason
+    # Without auto-off the floor stays command_min itself.
+    pi = build(HEAT)
+    pi.set_integral(HEAT, 1.8)
+    warm_up(pi, HEAT, room=19.0, target=18.5)
+    r = cycle(pi, HEAT, room=19.0, target=18.5, now=300.0)
+    assert r.hold_reason == HOLD_COMMAND_SATURATED
+
+
+def test_heating_auto_off_holds_the_less_output_side_while_stopped():
+    """Stopped means nothing delivered, including inside the hysteresis zone."""
+    pi = build(HEAT, auto_off=True)
+    pi.set_integral(HEAT, 1.7)                  # raw 16.7: between 16.5 and 17.0
+    warm_up(pi, HEAT, room=19.0, target=18.5)
+    r = cycle(pi, HEAT, room=19.0, target=18.5, now=300.0, auto_off_active=True)
+    assert r.hold_reason == HOLD_AUTO_OFF
+    assert r.i == 1.7
+    # Once the room drops below target the way back up is open.
+    r = cycle(pi, HEAT, room=18.0, target=18.5, now=600.0, auto_off_active=True)
+    assert r.integrating, r.hold_reason
+    assert r.i > 1.7
+
+
+def test_cooling_auto_off_keeps_the_idle_hold():
+    """No leak in cooling: an idle unit gives out nothing, so nothing to chase."""
+    pi = build(COOL, auto_off=True)
+    warm_up(pi, COOL, room=23.0, target=26.0, internal=24.0, ac_setpoint=30.0)
+    r = cycle(pi, COOL, room=23.0, target=26.0, now=300.0,
+              internal=24.0, ac_setpoint=30.0)
+    assert r.hold_reason == HOLD_UNIT_IDLE
+    r = cycle(pi, COOL, room=23.0, target=26.0, now=600.0,
+              internal=24.0, ac_setpoint=30.0, auto_off_active=True)
+    assert r.hold_reason == HOLD_UNIT_IDLE
 
 
 def test_command_range_is_not_split_by_the_threshold():

@@ -747,6 +747,8 @@ class PidClimate(ClimateEntity, RestoreEntity):
             ),
             ac_setpoint=_as_float(target_state.attributes.get(ATTR_TEMPERATURE), None),
             command_step=self._command_step,
+            # Last cycle's decision: whether the unit is stopped right now.
+            auto_off_active=self._auto_off,
         )
         self._last_result = result
 
@@ -760,6 +762,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
             command_max=result.command_max,
             margin=cfg.auto_off_margin,
             currently_off=self._auto_off,
+            command_step=self._command_step,
         )
 
         await self._async_apply(mode, result, target_state, force)

@@ -294,6 +294,20 @@ First match wins; exposed as `hold_reason`.
    This is the target-unreachable-in-this-mode case — summer, cool mode, target
    26, room 23, `error = +3` — and it holds through a slow multi-hour approach
    because it keys off direction and achievability, not output magnitude.
+
+   **Heating with `auto_off` is the exception.** There, idle does not mean
+   nothing: the coil keeps leaking heat into the room with the fan stopped (§1),
+   and stopping the unit is one more step past idle. Holding here would leave only
+   P to drag `raw` down to the auto-off point, and a small overshoot never gets
+   there — the unit sits at its floor, leaking into a room that is already too
+   warm. So in that case `unit_idle` does not apply: the integral keeps going down
+   until `command_saturated` takes over at the auto-off point (reason 6), and once
+   the unit is stopped the less-output direction is held as **`auto_off`** — a
+   stopped unit really does deliver nothing, so further integration that way is
+   windup, including inside the restart hysteresis. The more-output direction is
+   never held, so the room cooling below target still integrates up towards the
+   restart. Cooling keeps `unit_idle` unchanged: an idle cooling unit gives out no
+   cooling, so there is nothing to chase.
 5. **`unit_full_power`** — `unit_state == full_power` and the error asks for
    **more** output (heat: `error > 0`; cool: `error < 0`). The unit is flat out and
    short of capacity. Again the opposite direction is free: backing the setpoint
@@ -303,7 +317,9 @@ First match wins; exposed as `hold_reason`.
    asking to go past it — applied at the two ends of the modulating band.
 6. **`command_saturated`** — `raw > effective_max` and `error > 0`, or
    `raw < effective_min` and `error < 0`. Fallback for when `internal` is
-   unavailable and 4/5 cannot be evaluated.
+   unavailable and 4/5 cannot be evaluated. In heating with `auto_off` the lower
+   bound is the auto-off point (`effective_min − command_step/2`, §6.4) instead,
+   so the integral does not stop half a step short of it.
 7. **`outside_integral_band`** — optional, **default disabled** (`0`). Hold when
    `|error| > integral_band`.
 
@@ -457,11 +473,13 @@ threshold — so no rate-limit bypass is needed.
 ### 6.4 Auto-off (optional, per mode, default off)
 
 Enabled with `auto_off: true`. When the **raw** command leaves the writable range in
-the direction meaning "less output than the unit's gentlest setting" —
-`raw < command_min` in heat, `raw > command_max` in cool — the unit is stopped with
-`hvac_mode: off` rather than parked at a setpoint it will overshoot. This is
-evaluated on `raw` because the rounded, clamped command can never leave the range by
-definition.
+the direction meaning "less output than the unit's gentlest setting", the unit is
+stopped with `hvac_mode: off` rather than parked at a setpoint it will overshoot.
+The boundary sits half a `command_step` beyond the range, where the *rounded*
+command would leave it: `raw < command_min − step/2` in heat, `raw ≥ command_max +
+step/2` in cool. With the defaults that is 16.5 — a raw of 16.9 is written as 17, a
+perfectly valid command, so it is not a reason to stop. This is evaluated on `raw`
+because the clamped command can never leave the range by definition.
 
 The loop keeps running while the unit is stopped: our entity stays in `heat`/`cool`,
 only the underlying unit is off. So the command is still computed every cycle and
@@ -471,7 +489,9 @@ have kept it.
 
 `auto_off_margin` (default 0.5 °C) is one-sided hysteresis on the way back: the
 command must climb `margin` past the boundary before restarting, so a command
-sitting on the edge cannot flap the compressor. It applies to `raw`, so the room
+sitting on the edge cannot flap the compressor. With a step of 1 the default margin
+brings `raw` back to exactly 17.0 (30.0 in cool), so the restart writes the unit's
+gentlest setting rather than skipping past it. It applies to `raw`, so the room
 movement it corresponds to is `margin / kp`.
 
 Both transitions bypass `min_setpoint_interval` and the resync timer — stopping and
@@ -479,14 +499,18 @@ starting a compressor should not wait ten minutes. The state survives a restart,
 a stopped unit is not briefly started again across a reboot, and it is reported as
 the `auto_off` attribute and as `hvac_action: idle`.
 
-The integral needs no special handling: `raw` outside the range in that direction is
-exactly §5.2's `command_saturated`, which already holds it.
+Integration on the way there: `raw` past the auto-off point is §5.2's
+`command_saturated`, which holds it, and in heating the bound is moved to match. In
+heating the `unit_idle` hold is also lifted so the integral can actually reach that
+point, and a stopped unit holds the less-output direction as `auto_off` — see §5.2
+reason 4 for why both are heat only.
 
 **Where this actually fires.** Cooling is the useful case — an unreachable summer
 target drives `raw` well past `command_max`, and stopping is the right answer rather
-than sitting at 30. In heating it only fires where `command_min` is a real floor;
-with 8 °C mode configured `command_min` is 5, so `raw` will essentially never fall
-below it and `auto_off` is inert.
+than sitting at 30. In heating it fires where `command_min` is a real floor, and is
+what stops the coil leaking heat into an overshooting room; with 8 °C mode
+configured `command_min` is 5, so `raw` will essentially never fall below it and
+`auto_off` is inert.
 
 ### 6.5 When off
 
