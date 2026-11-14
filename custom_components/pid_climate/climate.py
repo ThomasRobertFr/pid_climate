@@ -291,7 +291,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
     """PI regulation of an underlying climate entity."""
 
     _attr_should_poll = False
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_has_entity_name = True
     _attr_name = None                # takes the device name: "Salon"
     # The tuning never changes at runtime, so keep it out of the recorder rather
@@ -314,7 +314,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
         if config[c.CONF_FAN_ONLY]:
             self._attr_hvac_modes.append(HVACMode.FAN_ONLY)
         self._attr_hvac_mode = HVACMode.OFF
-        self._attr_target_temperature = config.get(c.CONF_TARGET_TEMP)
+        self._attr_native_target_temperature = config.get(c.CONF_TARGET_TEMP)
 
         self._target_entity = config[c.CONF_TARGET_ENTITY]
         self._room_sensor = config[c.CONF_ROOM_SENSOR]
@@ -400,7 +400,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
         return self._desired_preset if self._high_power_switch else None
 
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         return self._room
 
     @property
@@ -481,8 +481,8 @@ class PidClimate(ClimateEntity, RestoreEntity):
 
         await self._async_restore()
 
-        if self._attr_target_temperature is None:
-            self._attr_target_temperature = self._attr_min_temp
+        if self._attr_native_target_temperature is None:
+            self._attr_native_target_temperature = self._attr_min_temp
 
         # Never integrate across the restart gap.
         self._pi.forget_timing()
@@ -491,9 +491,9 @@ class PidClimate(ClimateEntity, RestoreEntity):
         if (last := await self.async_get_last_state()) is not None:
             if last.state in self._attr_hvac_modes:
                 self._attr_hvac_mode = HVACMode(last.state)
-            if self._attr_target_temperature is None:
+            if self._attr_native_target_temperature is None:
                 if (temp := last.attributes.get(ATTR_TEMPERATURE)) is not None:
-                    self._attr_target_temperature = _as_float(temp, None)
+                    self._attr_native_target_temperature = _as_float(temp, None)
             self._desired_fan_mode = last.attributes.get(c.ATTR_FAN_MODE)
             if (preset := last.attributes.get(c.ATTR_PRESET_MODE)) in (
                 c.PRESET_NONE, c.PRESET_BOOST,
@@ -518,7 +518,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
         # An active mode owns the displayed target; while off, the last one does.
         owner = self._active_mode() or self._last_mode
         if (remembered := self._targets.get(owner)) is not None:
-            self._attr_target_temperature = remembered
+            self._attr_native_target_temperature = remembered
 
         for mode, values in stored.modes.items():
             if mode not in self._pi.modes:
@@ -556,14 +556,14 @@ class PidClimate(ClimateEntity, RestoreEntity):
         if (temperature := kwargs.get(ATTR_TEMPERATURE)) is None:
             return
 
-        old = self._attr_target_temperature
+        old = self._attr_native_target_temperature
         new = float(temperature)
         # The target belongs to the active mode, or the last active one while off,
         # and so does the hold it arms.
         owner = self._active_mode() or self._last_mode
         if old is not None and new != old:
             self._pi.on_target_change(owner, old, new, self._now())
-        self._attr_target_temperature = new
+        self._attr_native_target_temperature = new
         self._targets[owner] = new
         self.async_write_ha_state()
         # A change you just made should land now, not up to min_setpoint_interval
@@ -582,9 +582,9 @@ class PidClimate(ClimateEntity, RestoreEntity):
         if (mode := self._mode_of(hvac_mode)) is not None:
             self._last_mode = mode
             if (remembered := self._targets.get(mode)) is not None:
-                self._attr_target_temperature = remembered
+                self._attr_native_target_temperature = remembered
             else:
-                self._targets[mode] = self._attr_target_temperature
+                self._targets[mode] = self._attr_native_target_temperature
 
         self._pi.forget_timing()
         self._last_setpoint = None
@@ -717,7 +717,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
             self._set_blocked("no_room_temperature")
             self._pi.forget_timing()
             return
-        if self._attr_target_temperature is None:
+        if self._attr_native_target_temperature is None:
             self._set_blocked("no_target_temperature")
             return
 
@@ -737,7 +737,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
         result = self._pi.step(
             mode=mode,
             room=self._room,
-            target=self._attr_target_temperature,
+            target=self._attr_native_target_temperature,
             now=self._now(),
             command_min=low,
             command_max=high,
