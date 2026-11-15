@@ -116,7 +116,7 @@ the diagnostics are prefixed with it — a device named "Living Room" gives
 | `current_temperature` | from `room_sensor`, never from the underlying unit |
 | `hvac_action` | `off` / `fan` / `heating` / `cooling` / `idle`, `idle` from §5's detector |
 | `fan_mode` | `fan_modes` mirrored from the underlying entity; pass-through |
-| `preset_mode` | `none` / `boost`, driving `high_power_switch` — owned, not mirrored |
+| `preset_mode` | `none`, plus `eco` when a mode has `eco_offset`, plus `boost` (driving `high_power_switch`) — owned, not mirrored |
 
 Mode selection is manual only. No auto heat/cool switching, ever.
 
@@ -146,6 +146,16 @@ It would also mean the entity reports one value and then silently changes it at 
 next resync, and that a switch reporting `unavailable` at startup leaves
 `preset_mode` blank rather than restoring what you last chose. Flip the switch
 directly and the next resync puts it back.
+
+**`eco` preset.** Offered when a mode block sets `eco_offset` (e.g. `-1.5` under `heat`).
+While it is on, the controller regulates to `target + eco_offset` for the active mode;
+the user-facing `target_temperature` is untouched, so a target changed during eco is
+still the one restored when eco ends. The regulated value is exposed as the
+`effective_target` attribute (charted by the panel). Entering or leaving eco arms the
+§5.3 hold like any target change; holds are always computed on effective targets.
+Presets are exclusive: eco turns `high_power_switch` off, and boost leaves eco. A mode
+without `eco_offset` regulates to its plain target even while eco is on. Meant to be
+driven by an automation (night / away setback).
 
 If the underlying entity is not loaded at startup, `fan_modes` falls back to the
 configured `fan_modes` list, replaced by the underlying entity's own list as soon
@@ -447,6 +457,13 @@ accept: with the switch **off** it takes the normal range (typically 17–30 °C
 with it **on** it takes a lower one (in my case 5–16 °C). In effect the switch
 extends the heating range downward.
 
+The switch is only flipped on a real transition, never re-asserted on every write. On
+Toshiba units 8 °C mode and high power are two values of one field (`ac_merit_a`), so
+"8 °C off" also cancels high power. For the same reason the `boost` preset is only
+asserted onto `high_power_switch` while 8 °C mode is off: 8 °C mode wins, since without
+it setpoints below the threshold are rejected. Boost comes back by itself when the
+command climbs out of the 8 °C band.
+
 That matters for a PID, because a computed setpoint below the normal floor would
 otherwise just be clamped at 17 and leave the room running warm. Given the switch
 entity, this integration uses the whole extended range and flips the switch as
@@ -604,6 +621,9 @@ climate:
       auto_off: false
       auto_off_margin: 0.5   # only with auto_off: true. Hysteresis on raw before restarting,
                              # so the room movement it corresponds to is margin / kp
+
+      # Setback for the `eco` preset (optional; offers the preset when non-zero)
+      eco_offset: -1.5
 
     cool:
       offset: 1.0

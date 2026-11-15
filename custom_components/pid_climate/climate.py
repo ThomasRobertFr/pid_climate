@@ -92,6 +92,9 @@ MODE_SCHEMA = vol.Schema(
         vol.Optional(c.CONF_HOLD_RELEASE_BAND, default=0.3): vol.Coerce(float),
         vol.Optional(c.CONF_AUTO_OFF, default=False): cv.boolean,
         vol.Optional(c.CONF_AUTO_OFF_MARGIN, default=0.5): vol.Coerce(float),
+        # Added to the target while the `eco` preset is on. Not a controller
+        # setting: the controller only ever sees the effective target.
+        vol.Optional(c.CONF_ECO_OFFSET, default=0.0): vol.Coerce(float),
     }
 )
 
@@ -320,6 +323,13 @@ class PidClimate(ClimateEntity, RestoreEntity):
         self._room_sensor = config[c.CONF_ROOM_SENSOR]
         self._outdoor_sensor = config.get(c.CONF_OUTDOOR_SENSOR)
         self._high_power_switch = config.get(c.CONF_HIGH_POWER_SWITCH)
+        # Per-mode setback for the `eco` preset. Entries stored before the option
+        # existed have no key, hence the .get.
+        self._eco_offsets: dict[str, float] = {
+            mode: float((config.get(key) or {}).get(c.CONF_ECO_OFFSET, 0.0))
+            for key, mode in ((c.CONF_HEAT, HEAT), (c.CONF_COOL, COOL))
+            if mode in modes
+        }
         self._eight_deg_switch = config.get(c.CONF_EIGHT_DEG_SWITCH)
         self._eight_deg_threshold = config[c.CONF_EIGHT_DEG_THRESHOLD]
         self._eight_deg_settle = config[c.CONF_EIGHT_DEG_SETTLE]
@@ -365,7 +375,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
             | ClimateEntityFeature.TURN_OFF
             | ClimateEntityFeature.FAN_MODE
         )
-        if self._high_power_switch:
+        if self.preset_modes:
             features |= ClimateEntityFeature.PRESET_MODE
         return features
 
@@ -386,7 +396,17 @@ class PidClimate(ClimateEntity, RestoreEntity):
 
     @property
     def preset_modes(self) -> list[str] | None:
-        return [c.PRESET_NONE, c.PRESET_BOOST] if self._high_power_switch else None
+        """`eco` when any mode has an eco_offset, `boost` with a high-power switch.
+
+        Exclusive, like every HA preset: boost leaves eco, and eco turns the
+        high-power switch off.
+        """
+        modes = [c.PRESET_NONE]
+        if any(self._eco_offsets.values()):
+            modes.append(c.PRESET_ECO)
+        if self._high_power_switch:
+            modes.append(c.PRESET_BOOST)
+        return modes if len(modes) > 1 else None
 
     @property
     def preset_mode(self) -> str | None:
@@ -397,7 +417,18 @@ class PidClimate(ClimateEntity, RestoreEntity):
         preset is now ours, defaults to `none`, and is asserted onto the switch on
         every resync, exactly like hvac_mode and fan_mode.
         """
-        return self._desired_preset if self._high_power_switch else None
+        return self._desired_preset if self.preset_modes else None
+
+    def _effective_target(self, mode: str | None = None) -> float | None:
+        """The target the controller regulates to: the user's, plus the eco setback.
+
+        `mode` defaults to the mode owning the target (active, else last active).
+        """
+        target = self._attr_native_target_temperature
+        if target is None or self._desired_preset != c.PRESET_ECO:
+            return target
+        mode = mode or self._active_mode() or self._last_mode
+        return target + self._eco_offsets.get(mode, 0.0)
 
     @property
     def native_current_temperature(self) -> float | None:
@@ -423,6 +454,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
         attrs: dict = {
             "target_entity": self._target_entity,
             "auto_off": self._auto_off,
+            "effective_target": self._effective_target(),
         }
         if self._blocked:
             attrs["control_blocked"] = self._blocked
@@ -496,7 +528,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
                     self._attr_native_target_temperature = _as_float(temp, None)
             self._desired_fan_mode = last.attributes.get(c.ATTR_FAN_MODE)
             if (preset := last.attributes.get(c.ATTR_PRESET_MODE)) in (
-                c.PRESET_NONE, c.PRESET_BOOST,
+                self.preset_modes or ()
             ):
                 self._desired_preset = preset
 
@@ -559,10 +591,15 @@ class PidClimate(ClimateEntity, RestoreEntity):
         old = self._attr_native_target_temperature
         new = float(temperature)
         # The target belongs to the active mode, or the last active one while off,
-        # and so does the hold it arms.
+        # and so does the hold it arms. The hold works on effective targets, so a
+        # change made during eco and the eco toggles share one frame of reference.
         owner = self._active_mode() or self._last_mode
         if old is not None and new != old:
-            self._pi.on_target_change(owner, old, new, self._now())
+            old_eff = self._effective_target(owner)
+            self._attr_native_target_temperature = new
+            self._pi.on_target_change(
+                owner, old_eff, self._effective_target(owner), self._now()
+            )
         self._attr_native_target_temperature = new
         self._targets[owner] = new
         self.async_write_ha_state()
@@ -633,15 +670,44 @@ class PidClimate(ClimateEntity, RestoreEntity):
             )
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
-        if not self._high_power_switch or preset_mode not in (
-            c.PRESET_NONE, c.PRESET_BOOST,
-        ):
+        if preset_mode not in (self.preset_modes or ()):
             return
+        owner = self._active_mode() or self._last_mode
+        old_eff = self._effective_target(owner)
         self._desired_preset = preset_mode
+        new_eff = self._effective_target(owner)
+        moved = old_eff is not None and new_eff is not None and new_eff != old_eff
+        if moved:
+            # Entering or leaving eco is a target change as far as the integral
+            # is concerned.
+            self._pi.on_target_change(owner, old_eff, new_eff, self._now())
         self.async_write_ha_state()
-        await self._async_switch(
-            self._high_power_switch, preset_mode == c.PRESET_BOOST
-        )
+        await self._async_assert_boost()
+        if moved:
+            await self._async_control(force=True)
+
+    async def _async_assert_boost(self, eight_on: bool | None = None) -> None:
+        """Put the high-power switch where the preset wants it.
+
+        On Toshiba units high power and 8 degC mode are two values of one field
+        (`ac_merit_a`), so they cannot both be on: turning one on clears the other.
+        8 degC mode wins -- without it the unit rejects setpoints below the
+        threshold -- so boost is only asserted while it is off. `eight_on` is the
+        8 degC state just written, when the caller knows it better than the
+        (possibly not yet updated) switch entity.
+        """
+        if not self._high_power_switch:
+            return
+        if eight_on is None:
+            eight = (
+                self.hass.states.get(self._eight_deg_switch)
+                if self._eight_deg_switch else None
+            )
+            eight_on = eight is not None and eight.state == STATE_ON
+        want = self._desired_preset == c.PRESET_BOOST and not eight_on
+        switch = self.hass.states.get(self._high_power_switch)
+        if switch is not None and (switch.state == STATE_ON) != want:
+            await self._async_switch(self._high_power_switch, want)
 
     async def async_set_integral(self, value: float, mode: str | None = None) -> None:
         if (target := mode or self._active_mode()) is None:
@@ -737,7 +803,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
         result = self._pi.step(
             mode=mode,
             room=self._room,
-            target=self._attr_native_target_temperature,
+            target=self._effective_target(mode),
             now=self._now(),
             command_min=low,
             command_max=high,
@@ -853,11 +919,7 @@ class PidClimate(ClimateEntity, RestoreEntity):
                     )
                 # The unit engages high power by itself when a mode starts, so put
                 # the switch back where we want it rather than adopting its choice.
-                if self._high_power_switch:
-                    want_boost = self._desired_preset == c.PRESET_BOOST
-                    switch = self.hass.states.get(self._high_power_switch)
-                    if switch is not None and (switch.state == STATE_ON) != want_boost:
-                        await self._async_switch(self._high_power_switch, want_boost)
+                await self._async_assert_boost()
 
             if write_setpoint:
                 await self._async_write_setpoint(mode, result, now)
@@ -887,13 +949,17 @@ class PidClimate(ClimateEntity, RestoreEntity):
         if eight_on is not None and self._eight_deg_switch:
             state = self.hass.states.get(self._eight_deg_switch)
             currently_on = state is not None and state.state == STATE_ON
-            if not await self._async_switch(self._eight_deg_switch, eight_on):
-                # The unit only accepts 5-16 with 8 °C mode on and 17-30 with it
-                # off, so a setpoint written against the wrong state is rejected.
-                # Leave the AC alone and retry on the next cycle.
-                return
+            # Only on a real transition: on Toshiba units "8 degC off" resets the
+            # shared merit field, which also cancels high power (boost).
             if currently_on != eight_on:
+                if not await self._async_switch(self._eight_deg_switch, eight_on):
+                    # The unit only accepts 5-16 with 8 °C mode on and 17-30 with
+                    # it off, so a setpoint written against the wrong state is
+                    # rejected. Leave the AC alone and retry on the next cycle.
+                    return
                 await asyncio.sleep(self._eight_deg_settle)
+                # Leaving 8 degC mode is when a wanted boost can come back.
+                await self._async_assert_boost(eight_on)
 
         if await self._async_call(
             CLIMATE_DOMAIN, SERVICE_SET_TEMPERATURE,

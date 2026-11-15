@@ -47,6 +47,7 @@ CONF_HOLD_MAX = "integral_hold_max"
 CONF_HOLD_RELEASE_BAND = "integral_hold_release_band"
 CONF_AUTO_OFF = "auto_off"
 CONF_AUTO_OFF_MARGIN = "auto_off_margin"
+CONF_ECO_OFFSET = "eco_offset"
 
 # Services
 SERVICE_SET_INTEGRAL = "set_integral"
@@ -63,6 +64,7 @@ ATTR_PRESET_MODE = "preset_mode"
 
 PRESET_NONE = "none"
 PRESET_BOOST = "boost"
+PRESET_ECO = "eco"
 
 DEFAULT_FAN_MODES = ["Auto", "Low", "Medium", "High"]
 

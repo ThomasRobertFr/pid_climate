@@ -175,7 +175,7 @@ function climateSeries(rows, gapMs) {
     const mode = r.s === "heat" || r.s === "cool" ? r.s : null;
     T.push(new Date(r.t));
     o.room.push(num(a.current_temperature));
-    o.target.push(num(a.temperature));
+    o.target.push(num(a.effective_target ?? a.temperature));  // eco setback included
     o.raw.push(mode ? num(a.setpoint_raw) : null);
     o.sent.push(num(a.setpoint_sent));
     o.cmin.push(mode ? num(a.command_min) : null);
@@ -268,7 +268,7 @@ function renderStatus() {
     <h2>${esc(r.name)} <span class="pill">${esc(mode)}</span> ${pills.join(" ")}</h2>
     <div class="stats">
       <div class="stat"><div class="k">Room</div><div class="v">${f2(a.current_temperature, " °C")}</div></div>
-      <div class="stat"><div class="k">Target</div><div class="v">${f1(a.temperature, " °C")}</div></div>
+      <div class="stat"><div class="k">Target</div><div class="v">${f1(a.temperature, " °C")}${a.preset_mode === "eco" ? ` <small>eco → ${f1(a.effective_target, " °C")}</small>` : ""}</div></div>
       <div class="stat"><div class="k">Error</div><div class="v">${f2(a.error, " °C")}</div></div>
       <div class="stat"><div class="k">P · I · E</div><div class="v">${f2(a.pid_p)} · ${f2(a.pid_i)} · ${f2(a.pid_e)}</div></div>
       <div class="stat"><div class="k">Command raw → sent</div><div class="v">${f2(a.setpoint_raw)} → ${f1(a.setpoint_sent, " °C")} <small>(${f1(a.command_min)}–${f1(a.command_max)})</small></div></div>
