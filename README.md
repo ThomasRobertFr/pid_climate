@@ -652,6 +652,34 @@ names the missing input, and a warning is logged once on the way in and out.
 In every case integration timing is forgotten, so the first cycle after recovery
 reports `no_time_delta` and cannot integrate across the outage.
 
+## 10.1 PID monitor panel
+
+**PID** in Home Assistant's sidebar (admins only) shows how each room is regulating.
+
+- **Data comes from the recorder.** The climate entity's attributes carry every
+  control cycle (error, P, I, E, raw and sent setpoints, unit state, hold), so the
+  panel keeps no storage of its own and can show as far back as the recorder
+  keeps history. In live mode it subscribes to `history/stream` and updates as
+  each cycle lands.
+- **Charts** (Plotly, shared time axis): room temperature against the target and
+  a ±0.3 °C band, the AC's own reading and the outdoor sensor; raw command, sent
+  setpoint and the setpoint the AC reports; the P, I and E terms with the integral
+  limits; and strips for mode, unit state and hold reason. Holds, off periods and
+  room-sensor outages are shaded; target and mode changes are marked.
+- **Metrics** over the range shown, on regulating time only: time within ±0.3 and
+  ±0.5 °C, mean |error|, worst overshoot, setpoint changes, time on hold, time with
+  the integral at its limit, and the unit-state split.
+- **Live status and actions**: current values, *Reset integral*, *Clear hold* and
+  *Force update* (the same services and button as §8).
+- **Tuning in force** for both modes, plus sampling and write intervals.
+
+Implementation: `panel.py` registers the iframe panel, serves `www/panel.html`
+with `no-store` (editing the page needs only a reload) and adds the
+`pid_climate/rooms` websocket command (each room's entities, intervals and
+tuning). The page borrows the frontend's websocket connection, so it needs no
+token. Plotly is loaded from `cdn.jsdelivr.net` (pinned), so the charts need
+internet access.
+
 ## 11. Non-goals
 
 Autotune, PWM/switch output, window/presence/motion, power management, central

@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PID monitor</title>
+<!-- Plotly from a CDN, pinned: the panel needs internet access for the charts. -->
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6;
+    --accent: #2f6fdb; --accent-soft: #e4edfc; --danger: #c43d2f; --warn: #b8860b; --ok: #2e8b57;
+    --room: #d9480f; --target: #2f6fdb; --outdoor: #7a7a74; --ac: #8e44ad; --raw: #0b7285; --sent: #e8590c;
+    --p: #2b8a3e; --i: #c2255c; --e: #5c7cfa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --panel: #212120; --text: #ecece8; --muted: #9a9a93; --line: #3a3a37;
+      --accent: #6b9bf0; --accent-soft: #23314d; --danger: #ef6a5a; --warn: #e0b040; --ok: #5cc28a;
+      --room: #ff8a4c; --target: #6b9bf0; --outdoor: #a0a09a; --ac: #c08ae0; --raw: #3bc9db; --sent: #ffa94d;
+      --p: #69db7c; --i: #f783ac; --e: #91a7ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; }
+  button { font: inherit; color: inherit; border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  select { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; max-width: 220px; }
+  .grp { display: inline-flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .grow { flex: 1; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  main { padding: 12px 16px 40px; max-width: 1500px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  .err { color: var(--danger); white-space: pre-wrap; font-size: 13px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 14px; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .v small { font-size: 12px; font-weight: 400; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  h2 { font-size: 14px; margin: 0 0 10px; display: flex; gap: 8px; align-items: center; }
+  .pill { font-size: 11px; padding: 1px 8px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .pill.bad { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+  .live { color: var(--ok); font-size: 12px; }
+  .live::before { content: "●"; margin-right: 4px; }
+  #chart { width: 100%; height: 820px; }
+  table.tune { border-collapse: collapse; font-size: 13px; }
+  table.tune td, table.tune th { padding: 3px 10px 3px 0; text-align: left; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  table.tune th { color: var(--muted); font-weight: 400; }
+  details summary { cursor: pointer; font-weight: 600; }
+  @media (max-width: 700px) { #chart { height: 900px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>PID</h1>
+  <div class="grp" id="tabs"></div>
+  <div class="grp" id="ranges"></div>
+  <div class="grp">
+    <button id="prev" title="Earlier">‹</button>
+    <span id="rangeLbl" class="small muted"></span>
+    <button id="next" title="Later">›</button>
+    <button id="now">Now</button>
+  </div>
+  <label class="small muted">Outdoor <select id="outdoor" title="Outdoor temperature drawn on the chart (for every room; the PID's own E-term input is not used here)"></select></label>
+  <span class="grow"></span>
+  <span id="liveLbl"></span>
+</header>
+<main>
+  <div class="err" id="err"></div>
+  <div class="card" id="status"></div>
+  <div class="card" id="metrics"></div>
+  <div class="card"><div id="chart"></div>
+    <div class="small muted" style="margin-top:6px">Drag to zoom, double-click to reset. Shaded: <span style="color:var(--warn)">integral hold</span>, grey: regulation off, <span style="color:var(--danger)">red: room sensor unavailable</span> (regulation pauses). Dotted verticals: target and mode changes.</div>
+  </div>
+  <details class="card" id="tuning"><summary>Tuning in force</summary><div id="tuneBody" style="margin-top:8px"></div></details>
+</main>
+<script>
+// ------------------------------------------------------------------ helpers
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const num = (v) => (v === null || v === undefined || v === "" || isNaN(Number(v)) ? null : Number(v));
+const f1 = (v, u = "") => (v == null ? "–" : `${Number(v).toFixed(1)}${u}`);
+const f2 = (v, u = "") => (v == null ? "–" : `${Number(v).toFixed(2)}${u}`);
+const pct = (v) => (v == null ? "–" : `${Math.round(v * 100)} %`);
+const dur = (s) => { if (s == null) return "–"; s = Math.round(s); if (s < 90) return `${s} s`; const m = Math.round(s / 60); return m < 90 ? `${m} min` : `${(m / 60).toFixed(1)} h`; };
+const RANGES = [[6, "6 h"], [24, "24 h"], [72, "3 d"], [168, "7 d"], [336, "14 d"], [720, "30 d"]];
+const S = { rooms: [], room: null, hours: 24, end: null, data: {}, unsub: null, seq: 0, outdoor: null };
+
+// The page runs in HA's iframe panel and borrows the frontend's connection and hass object.
+let connP = null;
+function conn() {
+  if (!connP) connP = (async () => {
+    let hc = null;
+    try { hc = window.parent !== window ? window.parent.hassConnection : null; } catch (_) { /* not HA */ }
+    if (!hc) throw new Error("Open this page from Home Assistant's sidebar (PID).");
+    return (await hc).conn;
+  })();
+  return connP;
+}
+function hass() {
+  try { return window.parent.document.querySelector("home-assistant")?.hass || null; } catch (_) { return null; }
+}
+async function send(msg) {
+  const c = await conn();
+  try { return await c.sendMessagePromise(msg); }
+  catch (e) { throw new Error(e?.message || JSON.stringify(e)); }
+}
+const room = () => S.rooms.find((r) => r.entity_id === S.room);
+
+// ------------------------------------------------------------------ data
+// Compressed history rows: {s, a, lu|lc}. `a` can be missing on streamed rows
+// whose attributes didn't change: carry the previous ones forward then.
+function addRows(eid, rows) {
+  const out = S.data[eid] || (S.data[eid] = []);
+  let lastA = out.length ? out[out.length - 1].a : {};
+  for (const r of rows) {
+    const t = (r.lu ?? r.lc) * 1000;
+    if (out.length && t < out[out.length - 1].t) continue;
+    const a = r.a ?? lastA;
+    lastA = a;
+    out.push({ t, s: r.s, a });
+  }
+}
+function windowMs() {
+  const end = S.end ?? Date.now();
+  return [end - S.hours * 3600e3, end];
+}
+async function loadRange() {
+  const r = room(); if (!r) return;
+  const seq = ++S.seq;
+  if (S.unsub) { try { (await S.unsub)(); } catch (_) { /* gone */ } S.unsub = null; }
+  S.data = {};
+  const ids = [...new Set([r.entity_id, r.target_entity, r.room_sensor, S.outdoor].filter(Boolean))];
+  const [a, z] = windowMs();
+  const base = { entity_ids: ids, minimal_response: false, no_attributes: false, significant_changes_only: false,
+    start_time: new Date(a).toISOString() };
+  $("err").textContent = "";
+  $("liveLbl").innerHTML = '<span class="small muted">loading…</span>';
+  try {
+    if (S.end == null) {
+      // Live: one subscription returns the window, then every new state.
+      const c = await conn();
+      S.unsub = c.subscribeMessage((ev) => {
+        if (seq !== S.seq) return;
+        for (const [eid, rows] of Object.entries(ev.states || {})) addRows(eid, rows);
+        const cut = Date.now() - S.hours * 3600e3;
+        for (const rows of Object.values(S.data)) { let i = 0; while (i < rows.length - 1 && rows[i + 1].t < cut) i++; if (i) rows.splice(0, i); }
+        $("liveLbl").innerHTML = '<span class="live">live</span>';
+        scheduleRender();
+      }, { type: "history/stream", ...base });
+      await S.unsub;
+    } else {
+      const res = await send({ type: "history/history_during_period", ...base, end_time: new Date(z).toISOString() });
+      if (seq !== S.seq) return;
+      for (const [eid, rows] of Object.entries(res || {})) addRows(eid, rows);
+      $("liveLbl").innerHTML = '<span class="small muted">history</span>';
+      scheduleRender();
+    }
+  } catch (e) { $("err").textContent = "Loading history: " + e.message; $("liveLbl").textContent = ""; }
+  updateRangeLabel();
+}
+
+// ------------------------------------------------------------------ series
+function climateSeries(rows, gapMs) {
+  const T = [], o = { room: [], target: [], raw: [], sent: [], cmin: [], cmax: [], p: [], i: [], e: [], err: [],
+    mode: [], unit: [], hold: [], integ: [], integral: [], holdRemaining: [], blocked: [], autoOff: [] };
+  for (const r of rows) {
+    const a = r.a || {};
+    const mode = r.s === "heat" || r.s === "cool" ? r.s : null;
+    T.push(new Date(r.t));
+    o.room.push(num(a.current_temperature));
+    o.target.push(num(a.temperature));
+    o.raw.push(mode ? num(a.setpoint_raw) : null);
+    o.sent.push(num(a.setpoint_sent));
+    o.cmin.push(mode ? num(a.command_min) : null);
+    o.cmax.push(mode ? num(a.command_max) : null);
+    o.p.push(mode ? num(a.pid_p) : null);
+    o.i.push(mode ? num(a.pid_i) : null);
+    o.e.push(mode ? num(a.pid_e) : null);
+    o.err.push(mode ? num(a.error) : null);
+    o.mode.push(r.s);
+    o.unit.push(mode ? a.unit_state ?? null : null);
+    o.hold.push(mode ? a.hold_reason ?? null : null);
+    o.integ.push(!!a.integrating);
+    o.integral.push(mode ? num(a[`integral_${mode}`]) : null);
+    o.holdRemaining.push(num(a.hold_remaining));
+    o.blocked.push(a.control_blocked ?? null);
+    o.autoOff.push(!!a.auto_off);
+  }
+  // time weight of each row: until the next one, capped (a long silence isn't "time in band")
+  const w = T.map((t, k) => (k + 1 < T.length ? Math.min(T[k + 1] - t, gapMs) : 0) / 1000);
+  return { T, w, ...o };
+}
+const simple = (rows, key) => ({ T: rows.map((r) => new Date(r.t)), v: rows.map((r) => num(key ? r.a?.[key] : r.s)) });
+
+// Spans where pred(k) holds, as [from, to] Date pairs (to = next row's time).
+function spans(T, pred) {
+  const out = []; let a = null;
+  for (let k = 0; k < T.length; k++) {
+    const on = pred(k);
+    if (on && a == null) a = T[k];
+    if (!on && a != null) { out.push([a, T[k]]); a = null; }
+  }
+  if (a != null) out.push([a, S.end ? new Date(S.end) : new Date()]);
+  return out;
+}
+
+// ------------------------------------------------------------------ metrics
+function metrics(cs, r) {
+  let on = 0, in3 = 0, in5 = 0, absErr = 0, hold = 0, atLim = 0, over = null, writes = 0;
+  const unit = {};
+  for (let k = 0; k < cs.T.length; k++) {
+    const mode = cs.mode[k] === "heat" || cs.mode[k] === "cool" ? cs.mode[k] : null;
+    if (k && cs.sent[k] != null && cs.sent[k] !== cs.sent[k - 1] && cs.sent[k - 1] != null) writes++;
+    const w = cs.w[k], e = cs.err[k];
+    if (!mode || e == null || !w) continue;
+    on += w; absErr += Math.abs(e) * w;
+    if (Math.abs(e) <= 0.3) in3 += w;
+    if (Math.abs(e) <= 0.5) in5 += w;
+    if (cs.hold[k]) hold += w;
+    const o = mode === "heat" ? -e : e;  // room past the target, in the mode's direction
+    if (over == null || o > over) over = o;
+    const cfg = r.modes?.[mode];
+    if (cfg && cs.integral[k] != null && (cs.integral[k] >= cfg.integral_max - 0.02 || cs.integral[k] <= cfg.integral_min + 0.02)) atLim += w;
+    if (cs.unit[k]) unit[cs.unit[k]] = (unit[cs.unit[k]] || 0) + w;
+  }
+  return { on, in3: on ? in3 / on : null, in5: on ? in5 / on : null, mae: on ? absErr / on : null,
+    hold: on ? hold / on : null, atLim: on ? atLim / on : null, over: over == null ? null : Math.max(0, over), writes, unit };
+}
+function renderMetrics(m) {
+  const units = Object.entries(m.unit).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${esc(k)} ${pct(v / m.on)}`).join(" · ");
+  $("metrics").innerHTML = `<h2>Over this range <span class="small muted">(regulating time only)</span></h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Regulating</div><div class="v">${dur(m.on)}</div></div>
+      <div class="stat"><div class="k">Within ±0.3 °C</div><div class="v">${pct(m.in3)}</div></div>
+      <div class="stat"><div class="k">Within ±0.5 °C</div><div class="v">${pct(m.in5)}</div></div>
+      <div class="stat"><div class="k">Mean |error|</div><div class="v">${f2(m.mae, " °C")}</div></div>
+      <div class="stat"><div class="k">Worst overshoot</div><div class="v">${f2(m.over, " °C")}</div></div>
+      <div class="stat"><div class="k">Setpoint changes</div><div class="v">${m.writes}</div></div>
+      <div class="stat"><div class="k">Integral on hold</div><div class="v">${pct(m.hold)}</div></div>
+      <div class="stat"><div class="k">Integral at its limit</div><div class="v">${pct(m.atLim)}</div></div>
+    </div>
+    <div class="small muted" style="margin-top:8px">Unit state: ${units || "–"}</div>`;
+}
+
+// ------------------------------------------------------------------ status (live state)
+function renderStatus() {
+  const r = room(); if (!r) return;
+  const st = hass()?.states?.[r.entity_id];
+  const ac = hass()?.states?.[r.target_entity];
+  const rows = S.data[r.entity_id] || [];
+  const a = st?.attributes || rows[rows.length - 1]?.a || {};
+  const mode = st?.state ?? rows[rows.length - 1]?.s ?? "?";
+  const pills = [];
+  if (a.control_blocked) pills.push(`<span class="pill bad">blocked: ${esc(a.control_blocked)}</span>`);
+  if (a.hold_reason) pills.push(`<span class="pill warn">hold: ${esc(a.hold_reason)}${a.hold_remaining ? " · " + dur(a.hold_remaining) : ""}</span>`);
+  if (a.auto_off) pills.push(`<span class="pill warn">auto-off: unit stopped</span>`);
+  if (a.integrating === false && mode !== "off") pills.push(`<span class="pill">not integrating</span>`);
+  const ago = a.last_write ? dur((Date.now() - Date.parse(a.last_write)) / 1000) + " ago" : "–";
+  const ent = r.entities || {};
+  $("status").innerHTML = `
+    <h2>${esc(r.name)} <span class="pill">${esc(mode)}</span> ${pills.join(" ")}</h2>
+    <div class="stats">
+      <div class="stat"><div class="k">Room</div><div class="v">${f2(a.current_temperature, " °C")}</div></div>
+      <div class="stat"><div class="k">Target</div><div class="v">${f1(a.temperature, " °C")}</div></div>
+      <div class="stat"><div class="k">Error</div><div class="v">${f2(a.error, " °C")}</div></div>
+      <div class="stat"><div class="k">P · I · E</div><div class="v">${f2(a.pid_p)} · ${f2(a.pid_i)} · ${f2(a.pid_e)}</div></div>
+      <div class="stat"><div class="k">Command raw → sent</div><div class="v">${f2(a.setpoint_raw)} → ${f1(a.setpoint_sent, " °C")} <small>(${f1(a.command_min)}–${f1(a.command_max)})</small></div></div>
+      <div class="stat"><div class="k">AC set · reads</div><div class="v">${f1(ac?.attributes?.temperature)} · ${f1(ac?.attributes?.current_temperature, " °C")} <small>${esc(ac?.state || "")}</small></div></div>
+      <div class="stat"><div class="k">Unit state</div><div class="v">${esc(a.unit_state ?? "–")}</div></div>
+      <div class="stat"><div class="k">Last setpoint write</div><div class="v">${ago}</div></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="bReset" title="pid_climate.reset_integral">Reset integral</button>
+      <button id="bHold" title="pid_climate.clear_hold" ${a.hold_reason ? "" : "disabled"}>Clear hold</button>
+      <button id="bForce" title="Run a control cycle now" ${ent.force_update ? "" : "disabled"}>Force update</button>
+      <span id="actMsg" class="small muted"></span>
+    </div>`;
+  const act = async (label, msg) => {
+    try { await send(msg); $("actMsg").textContent = `${label}: done`; } catch (e) { $("actMsg").textContent = `${label}: ${e.message}`; }
+  };
+  $("bReset").onclick = () => confirm(`Reset the ${r.name} integral to 0?`) &&
+    act("Reset integral", { type: "call_service", domain: "pid_climate", service: "reset_integral", target: { entity_id: r.entity_id } });
+  $("bHold").onclick = () => act("Clear hold", { type: "call_service", domain: "pid_climate", service: "clear_hold", target: { entity_id: r.entity_id } });
+  $("bForce").onclick = () => act("Force update", { type: "call_service", domain: "button", service: "press", target: { entity_id: ent.force_update } });
+}
+
+function renderTuning() {
+  const r = room(); if (!r) return;
+  const modes = Object.keys(r.modes || {});
+  const keys = [...new Set(modes.flatMap((m) => Object.keys(r.modes[m])))];
+  $("tuneBody").innerHTML = `<table class="tune"><tr><th></th>${modes.map((m) => `<th>${esc(m)}</th>`).join("")}</tr>` +
+    keys.map((k) => `<tr><th>${esc(k)}</th>${modes.map((m) => `<td>${esc(r.modes[m][k])}</td>`).join("")}</tr>`).join("") +
+    `</table><div class="small muted" style="margin-top:8px">Sampling ${dur(r.sampling_period)}, setpoint at most every ${dur(r.min_setpoint_interval)}, resync every ${dur(r.resync_interval)}. Command ${r.command_min}–${r.command_max} °C in steps of ${r.command_step}. Room sensor ${esc(r.room_sensor)}${r.outdoor_sensor ? ", outdoor " + esc(r.outdoor_sensor) : ""}, unit ${esc(r.target_entity)}.</div>`;
+}
+
+// ------------------------------------------------------------------ chart
+let rTimer = null;
+function scheduleRender() { if (rTimer) return; rTimer = setTimeout(() => { rTimer = null; render(); }, 250); }
+
+const CAT = {
+  heat: "#e8590c", cool: "#1c7ed6", off: "#868e96", fan_only: "#20c997",
+};
+function catColor(v) {
+  if (v == null) return "transparent";
+  if (CAT[v]) return CAT[v];
+  let h = 0; for (const ch of String(v)) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${h} 55% 55%)`;
+}
+
+function render() {
+  const r = room(); if (!r) return;
+  renderStatus();
+  const rows = S.data[r.entity_id] || [];
+  const gap = 2 * (r.sampling_period || 180) * 1000;
+  const cs = climateSeries(rows, gap);
+  renderMetrics(metrics(cs, r));
+  const sensor = S.data[r.room_sensor] ? simple(S.data[r.room_sensor]) : null;
+  const outdoor = S.outdoor && S.data[S.outdoor] ? simple(S.data[S.outdoor]) : null;
+  const acRows = S.data[r.target_entity] || [];
+  // While the 8 °C mode switches, the unit briefly reports placeholder setpoints
+  // (1, 31...). Drop anything outside the command range: the line keeps its last value.
+  const acSet = simple(acRows, "temperature"), acRead = simple(acRows, "current_temperature");
+  { const keep = acSet.v.map((v) => v != null && v >= r.command_min && v <= r.command_max);
+    acSet.T = acSet.T.filter((_, k) => keep[k]); acSet.v = acSet.v.filter((_, k) => keep[k]); }
+  const C = (v) => css(v);
+  // gl for the dense series; plain svg where a dash is needed
+  const line = (name, x, y, color, { yaxis, dash, width = 1.6 } = {}) =>
+    ({ type: dash ? "scatter" : "scattergl", mode: "lines", name, x, y, yaxis, line: { color, width, dash }, connectgaps: false });
+  const step = (name, x, y, color, { yaxis, dash } = {}) =>
+    ({ type: "scatter", mode: "lines", name, x, y, yaxis, line: { color, width: 1.6, shape: "hv", dash }, connectgaps: false });
+  const band = cs.target.map((t) => (t == null ? null : t + 0.3));
+  const bandLo = cs.target.map((t) => (t == null ? null : t - 0.3));
+  const traces = [
+    // --- temperatures (y)
+    { type: "scatter", mode: "lines", x: cs.T, y: bandLo, line: { width: 0, shape: "hv" }, hoverinfo: "skip", showlegend: false, yaxis: "y" },
+    { type: "scatter", mode: "lines", x: cs.T, y: band, line: { width: 0, shape: "hv" }, fill: "tonexty", fillcolor: "rgba(47,111,219,.12)", name: "target ±0.3", hoverinfo: "skip", yaxis: "y" },
+    step("target", cs.T, cs.target, C("--target"), { dash: "dash", yaxis: "y" }),
+    sensor ? line("room", sensor.T, sensor.v, C("--room"), { yaxis: "y" }) : line("room", cs.T, cs.room, C("--room"), { yaxis: "y" }),
+    line("AC reads", acRead.T, acRead.v, C("--ac"), { yaxis: "y", dash: "dot", width: 1.2 }),
+    // --- command (y2)
+    line("raw command", cs.T, cs.raw, C("--raw"), { yaxis: "y2" }),
+    step("sent", cs.T, cs.sent, C("--sent"), { yaxis: "y2" }),
+    step("AC setpoint", acSet.T, acSet.v, C("--ac"), { dash: "dot", yaxis: "y2" }),
+    // --- PID terms (y3)
+    line("P", cs.T, cs.p, C("--p"), { yaxis: "y3" }),
+    line("I", cs.T, cs.i, C("--i"), { yaxis: "y3" }),
+    line("E", cs.T, cs.e, C("--e"), { yaxis: "y3" }),
+  ];
+  if (outdoor) traces.push(line("outdoor", outdoor.T, outdoor.v, C("--outdoor"), { yaxis: "y5", width: 1.1 }));
+  // --- state strips (y4): mode, unit state, hold
+  for (const [label, arr] of [["mode", cs.mode], ["unit", cs.unit], ["hold", cs.hold]]) {
+    traces.push({ type: "scattergl", mode: "markers", x: cs.T, y: cs.T.map(() => label), yaxis: "y4", showlegend: false,
+      marker: { symbol: "square", size: 7, color: arr.map(catColor) }, text: arr.map((v) => `${label}: ${v ?? "–"}`), hoverinfo: "x+text" });
+  }
+  // shapes: holds and off periods, across the three plots
+  const shapes = [], annotations = [];
+  const shade = (a, b, color) => shapes.push({ type: "rect", xref: "x", yref: "paper", x0: a, x1: b, y0: 0.12, y1: 1, fillcolor: color, line: { width: 0 }, layer: "below" });
+  for (const [a, b] of spans(cs.T, (k) => !!cs.hold[k])) shade(a, b, "rgba(224,176,64,.14)");
+  for (const [a, b] of spans(cs.T, (k) => cs.mode[k] === "off" || cs.mode[k] === "unavailable")) shade(a, b, "rgba(128,128,128,.10)");
+  if (sensor) for (const [a, b] of spans(sensor.T, (k) => sensor.v[k] == null))
+    shapes.push({ type: "rect", xref: "x", yref: "paper", x0: a, x1: b, y0: 0.62, y1: 1, fillcolor: "rgba(196,61,47,.10)", line: { width: 0 }, layer: "below" });
+  // events: target and mode changes
+  for (let k = 1; k < cs.T.length; k++) {
+    let txt = null;
+    if (cs.mode[k] !== cs.mode[k - 1]) txt = cs.mode[k];
+    else if (cs.target[k] != null && cs.target[k - 1] != null && cs.target[k] !== cs.target[k - 1]) txt = `→ ${cs.target[k]}°`;
+    if (!txt) continue;
+    shapes.push({ type: "line", xref: "x", yref: "paper", x0: cs.T[k], x1: cs.T[k], y0: 0.12, y1: 1, line: { color: C("--muted"), width: 1, dash: "dot" } });
+    annotations.push({ x: cs.T[k], y: 1, xref: "x", yref: "paper", text: esc(txt), showarrow: false, yanchor: "bottom", font: { size: 10, color: C("--muted") } });
+  }
+  // integral limits of the mode in use
+  const lastMode = [...cs.mode].reverse().find((m) => m === "heat" || m === "cool");
+  const cfg = lastMode ? r.modes?.[lastMode] : null;
+  if (cfg) for (const lim of [cfg.integral_min, cfg.integral_max])
+    shapes.push({ type: "line", xref: "paper", yref: "y3", x0: 0, x1: 1, y0: lim, y1: lim, line: { color: C("--i"), width: 1, dash: "dash" }, opacity: .5 });
+  const [x0, x1] = windowMs();
+  const axis = (title, domain, extra = {}) => ({ title: { text: title, font: { size: 11 } }, domain, gridcolor: C("--line"), zerolinecolor: C("--line"), color: C("--muted"), ...extra });
+  const layout = {
+    uirevision: `${S.room}-${S.hours}-${S.end}`,
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { color: C("--text"), size: 11 },
+    margin: { l: 56, r: 56, t: 24, b: 90 }, hovermode: "x unified", showlegend: true,
+    legend: { orientation: "h", x: 0, y: -0.06, yanchor: "top", font: { size: 11 } },
+    xaxis: { type: "date", range: [new Date(x0), new Date(x1)], gridcolor: C("--line"), color: C("--muted"), anchor: "y4" },
+    yaxis: axis("°C", [0.62, 1]),
+    yaxis5: axis("outdoor °C", [0.62, 1], { overlaying: "y", side: "right", showgrid: false }),
+    yaxis2: axis("command °C", [0.38, 0.58]),
+    yaxis3: axis("P · I · E", [0.14, 0.34]),
+    yaxis4: axis("", [0, 0.1], { type: "category", categoryorder: "array", categoryarray: ["hold", "unit", "mode"], showgrid: false }),
+    shapes, annotations,
+  };
+  Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
+}
+
+// ------------------------------------------------------------------ chrome
+function renderTabs() {
+  $("tabs").innerHTML = S.rooms.map((r) => `<button data-e="${esc(r.entity_id)}" class="${r.entity_id === S.room ? "on" : ""}">${esc(r.name)}</button>`).join("");
+  $("tabs").querySelectorAll("button").forEach((b) => (b.onclick = () => { S.room = b.dataset.e; renderTabs(); renderTuning(); loadRange(); }));
+  $("ranges").innerHTML = RANGES.map(([h, l]) => `<button data-h="${h}" class="${h === S.hours ? "on" : ""}">${l}</button>`).join("");
+  $("ranges").querySelectorAll("button").forEach((b) => (b.onclick = () => { S.hours = +b.dataset.h; renderTabs(); loadRange(); }));
+}
+function updateRangeLabel() {
+  const [a, z] = windowMs();
+  const fmt = (t) => new Date(t).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  $("rangeLbl").textContent = S.end == null ? `last ${RANGES.find(([h]) => h === S.hours)?.[1]}` : `${fmt(a)} → ${fmt(z)}`;
+  $("next").disabled = S.end == null;
+  $("now").disabled = S.end == null;
+}
+$("prev").onclick = () => { S.end = (S.end ?? Date.now()) - S.hours * 3600e3; loadRange(); };
+$("next").onclick = () => { const e = (S.end ?? Date.now()) + S.hours * 3600e3; S.end = e >= Date.now() ? null : e; loadRange(); };
+$("now").onclick = () => { S.end = null; loadRange(); };
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+setInterval(renderStatus, 5000);  // live values and "x min ago"
+
+// Outdoor temperature picker: any °C temperature sensor; remembered per browser.
+function setupOutdoor() {
+  const st = hass()?.states || {};
+  const temps = Object.values(st).filter((x) => x.entity_id.startsWith("sensor.") && x.attributes?.device_class === "temperature"
+    && x.attributes?.unit_of_measurement === "°C" && !isNaN(Number(x.state)))
+    .sort((x, y) => (x.attributes.friendly_name || x.entity_id).localeCompare(y.attributes.friendly_name || y.entity_id));
+  let saved = null; try { saved = localStorage.getItem("pidOutdoor"); } catch (_) { /* private mode */ }
+  const pref = [saved, "sensor.openweathermap_temperature"].find((e) => e === "" || (e && st[e]));
+  S.outdoor = pref ?? (temps.find((x) => /outdoor|outside|exterieur|exterior|weather/i.test(x.entity_id))?.entity_id || "");
+  $("outdoor").innerHTML = `<option value="">none</option>` + temps.map((x) =>
+    `<option value="${esc(x.entity_id)}" ${x.entity_id === S.outdoor ? "selected" : ""}>${esc(x.attributes.friendly_name || x.entity_id)}</option>`).join("");
+  $("outdoor").onchange = (e) => { S.outdoor = e.target.value; try { localStorage.setItem("pidOutdoor", S.outdoor); } catch (_) { /* */ } loadRange(); };
+}
+
+(async () => {
+  try {
+    if (!window.Plotly) throw new Error("Plotly didn't load (the panel fetches it from cdn.jsdelivr.net; is there internet access?)");
+    const res = await send({ type: "pid_climate/rooms" });
+    S.rooms = res.rooms || [];
+    if (!S.rooms.length) throw new Error("No pid_climate room is running.");
+    const st = hass()?.states || {};
+    S.room = (S.rooms.find((r) => ["heat", "cool"].includes(st[r.entity_id]?.state)) || S.rooms[0]).entity_id;
+    setupOutdoor(); renderTabs(); renderTuning(); await loadRange();
+  } catch (e) { $("err").textContent = e.message; }
+})();
+</script>
+</body>
+</html>

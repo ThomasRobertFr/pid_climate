@@ -27,6 +27,17 @@ DEPENDENT_PLATFORMS = [Platform.SENSOR, Platform.BUTTON]
 
 SERVICE_RELOAD = "reload"
 
+# Configured under `climate:` only; there is no top-level `pid_climate:` key.
+CONFIG_SCHEMA = cv.platform_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Component setup, once: the PID monitor panel (see panel.py)."""
+    from .panel import async_setup_panel  # noqa: PLC0415 - keeps aiohttp/frontend out of import time
+
+    async_setup_panel(hass)
+    return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up one regulated room from its imported YAML block."""
