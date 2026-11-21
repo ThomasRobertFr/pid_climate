@@ -10,14 +10,10 @@
   :root {
     --bg: #f6f6f4; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6;
     --accent: #2f6fdb; --accent-soft: #e4edfc; --danger: #c43d2f; --warn: #b8860b; --ok: #2e8b57;
-    --room: #d9480f; --target: #2f6fdb; --outdoor: #7a7a74; --ac: #8e44ad; --raw: #0b7285; --sent: #e8590c;
-    --p: #2b8a3e; --i: #c2255c; --e: #5c7cfa;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #161615; --panel: #212120; --text: #ecece8; --muted: #9a9a93; --line: #3a3a37;
-      --accent: #6b9bf0; --accent-soft: #23314d; --danger: #ef6a5a; --warn: #e0b040; --ok: #5cc28a;
-      --room: #ff8a4c; --target: #6b9bf0; --outdoor: #a0a09a; --ac: #c08ae0; --raw: #3bc9db; --sent: #ffa94d;
-      --p: #69db7c; --i: #f783ac; --e: #91a7ff; }
+      --accent: #6b9bf0; --accent-soft: #23314d; --danger: #ef6a5a; --warn: #e0b040; --ok: #5cc28a; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.4 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
@@ -94,7 +90,7 @@
   <div class="err" id="err"></div>
   <div class="card"><div id="status"></div><div id="metrics"></div></div>
   <div class="card plot"><div id="chart"></div>
-    <div class="small muted" style="margin-top:6px">Drag to zoom, double-click to reset. Shaded: <span style="color:var(--warn)">integral hold</span>, grey: regulation off, <span style="color:var(--danger)">red: room sensor unavailable</span> (regulation pauses). Dotted verticals: target and mode changes.</div>
+    <div class="small muted" style="margin-top:6px">Drag to zoom the time, double-click to reset. Click a legend entry to show or hide it. Shading: why the integral is held, or regulation isn't running.</div>
   </div>
   <details class="card" id="tuning"><summary>Tuning in force</summary><div id="tuneBody" style="margin-top:8px"></div></details>
 </main>
@@ -111,7 +107,7 @@ const dur = (s) => { if (s == null) return "–"; s = Math.round(s); if (s < 90)
 const RANGES = [[6, "6 h"], [24, "24 h"], [72, "3 d"], [168, "7 d"], [336, "14 d"], [720, "30 d"]];
 const S = { rooms: [], room: null, hours: 24, end: null, data: {}, unsub: null, seq: 0, outdoor: null,
   // legend state by trace name, kept across rooms and ranges; these start hidden
-  vis: { "AC reads": "legendonly", outdoor: "legendonly" } };
+  vis: {} };
 
 // The page runs in HA's iframe panel and borrows the frontend's connection and hass object.
 let connP = null;
@@ -326,15 +322,20 @@ function renderTuning() {
 let rTimer = null;
 function scheduleRender() { if (rTimer) return; rTimer = setTimeout(() => { rTimer = null; render(); }, 250); }
 
-const CAT = {
-  heat: "#e8590c", cool: "#1c7ed6", off: "#868e96", fan_only: "#20c997",
+// Line colours, as on the Home v3 "PID Climate" plotly cards (readable on both themes).
+const COL = { target: "#4caf50", room: "#2196f3", cmd: "#e91e63", ac: "#9c27b0", outdoor: "#9e9e9e",
+  i: "#ff5722", p: "#00bcd4", e: "#8bc34a", err: "#607d8b" };
+// Shading over the whole chart: why the PID isn't integrating (or running). rgb, alpha added below.
+const HOLDS = {
+  target_change_hold: ["hold: target change", "255,152,0"],
+  unit_idle: ["hold: unit idle", "205,170,0"],
+  unit_full_power: ["hold: unit full power", "230,81,0"],
+  command_saturated: ["hold: command saturated", "216,27,96"],
+  outside_integral_band: ["hold: outside band", "0,150,136"],
+  integral_clamped: ["hold: I clamped", "126,87,194"],
+  sample_gap_too_long: ["hold: sample gap", "96,125,139"],
+  no_time_delta: ["hold: sample gap", "96,125,139"],
 };
-function catColor(v) {
-  if (v == null) return "transparent";
-  if (CAT[v]) return CAT[v];
-  let h = 0; for (const ch of String(v)) h = (h * 31 + ch.charCodeAt(0)) % 360;
-  return `hsl(${h} 55% 55%)`;
-}
 
 function render() {
   const r = room(); if (!r) return;
@@ -352,89 +353,117 @@ function render() {
   { const keep = acSet.v.map((v) => v != null && v >= r.command_min && v <= r.command_max);
     acSet.T = acSet.T.filter((_, k) => keep[k]); acSet.v = acSet.v.filter((_, k) => keep[k]); }
   const C = (v) => css(v);
-  // gl for the dense series; plain svg where a dash is needed
-  const line = (name, x, y, color, { yaxis, dash, width = 1.6 } = {}) =>
-    ({ type: dash ? "scatter" : "scattergl", mode: "lines", name, x, y, yaxis, line: { color, width, dash }, connectgaps: false });
-  const step = (name, x, y, color, { yaxis, dash } = {}) =>
-    ({ type: "scatter", mode: "lines", name, x, y, yaxis, line: { color, width: 1.6, shape: "hv", dash }, connectgaps: false });
+  const narrow = $("chart").clientWidth < 700;
+  const wide = $("chart").clientWidth >= 1000;  // legend on the right, values at the line ends
+  // gl for the dense series; plain svg for steps and dashes
+  const tr = (name, x, y, color, { yaxis = "y", width = 1.5, hv = false, dash, opacity, unit = " °C", hidden = false } = {}) => ({
+    type: hv || dash ? "scatter" : "scattergl", mode: "lines", name, x, y, yaxis, opacity, connectgaps: false,
+    line: { color, width, dash, shape: hv ? "hv" : "linear" }, visible: hidden ? "legendonly" : true,
+    hovertemplate: `${esc(name)}: %{y:.2f}${unit}<extra></extra>` });
   const band = cs.target.map((t) => (t == null ? null : t + 0.3));
   const bandLo = cs.target.map((t) => (t == null ? null : t - 0.3));
+  const room_ = sensor || { T: cs.T, v: cs.room };
   const traces = [
-    // --- temperatures (y)
-    { type: "scatter", mode: "lines", x: cs.T, y: bandLo, line: { width: 0, shape: "hv" }, hoverinfo: "skip", showlegend: false, yaxis: "y" },
-    { type: "scatter", mode: "lines", x: cs.T, y: band, line: { width: 0, shape: "hv" }, fill: "tonexty", fillcolor: "rgba(47,111,219,.12)", name: "target ±0.3", hoverinfo: "skip", yaxis: "y" },
-    step("target", cs.T, cs.target, C("--target"), { dash: "dash", yaxis: "y" }),
-    sensor ? line("room", sensor.T, sensor.v, C("--room"), { yaxis: "y" }) : line("room", cs.T, cs.room, C("--room"), { yaxis: "y" }),
-    // the unit's own thermometer reads the air at the unit: off by default, a click on the legend shows it
-    line("AC reads", acRead.T, acRead.v, C("--ac"), { yaxis: "y", dash: "dot", width: 1.2 }),
-    // --- command, on the same °C axis: what the PID asks next to what the room does
-    line("raw command", cs.T, cs.raw, C("--raw"), { yaxis: "y" }),
-    step("sent", cs.T, cs.sent, C("--sent"), { yaxis: "y" }),
-    step("AC setpoint", acSet.T, acSet.v, C("--ac"), { dash: "dot", yaxis: "y" }),
+    // --- °C (y): room and target, and the command next to them
+    { type: "scatter", mode: "lines", x: cs.T, y: bandLo, line: { width: 0, shape: "hv" }, hoverinfo: "skip", showlegend: false, legendgroup: "band" },
+    { type: "scatter", mode: "lines", x: cs.T, y: band, line: { width: 0, shape: "hv" }, fill: "tonexty", fillcolor: "rgba(76,175,80,.10)",
+      name: "target ±0.3", hoverinfo: "skip", legendgroup: "band" },
+    tr("Target", cs.T, cs.target, COL.target, { width: 2, hv: true }),
+    tr("Room", room_.T, room_.v, COL.room, { width: 2 }),
+    tr("Sent", cs.T, cs.sent, COL.cmd, { width: 2, hv: true }),
+    tr("Raw", cs.T, cs.raw, COL.cmd, { width: 1, opacity: 0.6 }),
+    tr("AC setpoint", acSet.T, acSet.v, COL.ac, { width: 1, hv: true, dash: "dot", hidden: true }),
+    tr("AC reads", acRead.T, acRead.v, COL.ac, { width: 1, opacity: 0.7, hidden: true }),
     // --- PID terms (y3)
-    line("P", cs.T, cs.p, C("--p"), { yaxis: "y3" }),
-    line("I", cs.T, cs.i, C("--i"), { yaxis: "y3" }),
-    line("E", cs.T, cs.e, C("--e"), { yaxis: "y3" }),
+    tr("I", cs.T, cs.i, COL.i, { yaxis: "y3", width: 3, unit: "" }),
+    tr("P", cs.T, cs.p, COL.p, { yaxis: "y3", width: 1, unit: "" }),
+    tr("E", cs.T, cs.e, COL.e, { yaxis: "y3", width: 1, unit: "", hidden: true }),
+    tr("error", cs.T, cs.err, COL.err, { yaxis: "y3", width: 1, unit: " °C", opacity: 0.5, hidden: true }),
   ];
-  if (outdoor) traces.push(line("outdoor", outdoor.T, outdoor.v, C("--outdoor"), { yaxis: "y5", width: 1.1 }));
+  if (outdoor) traces.push(tr("outdoor", outdoor.T, outdoor.v, COL.outdoor, { yaxis: "y5", width: 1.1, hidden: true }));
+
+  // --- shading over both plots (y6 / y7: hidden 0–1 axes overlaying them), one legend entry per kind
+  const now = S.end ? new Date(S.end) : new Date();
+  const shading = (name, rgb, alpha, pred) => {
+    const sp = spans(cs.T, pred); if (!sp.length) return;
+    const x = [], y = [];
+    for (const [a, b] of sp) { x.push(a, b); y.push(1, 0); }
+    for (const yaxis of ["y6", "y7"]) traces.push({ type: "scatter", mode: "lines", name, x, y, yaxis, legendgroup: name,
+      showlegend: yaxis === "y6", line: { width: 0, shape: "hv" }, fill: "tozeroy", fillcolor: `rgba(${rgb},${alpha})`,
+      hoverinfo: "skip", legendrank: 1100 });  // after the lines
+  };
+  const running = (k) => (cs.mode[k] === "heat" || cs.mode[k] === "cool") && !cs.blocked[k];
+  shading("not running", "158,158,158", 0.14, (k) => !running(k));
+  shading("auto-off", "244,67,54", 0.10, (k) => running(k) && cs.autoOff[k]);
+  const seen = new Set();
+  for (const [name, rgb] of Object.values(HOLDS)) {
+    if (seen.has(name)) continue; seen.add(name);
+    const keys = Object.keys(HOLDS).filter((k) => HOLDS[k][0] === name);
+    shading(name, rgb, 0.13, (k) => running(k) && !cs.autoOff[k] && keys.includes(cs.hold[k]));
+  }
+  // any reason this page doesn't know yet
+  shading("hold: other", "255,193,7", 0.13, (k) => running(k) && !cs.autoOff[k] && cs.hold[k] && cs.hold[k] !== "auto_off" && !HOLDS[cs.hold[k]]);
+
   for (const t of traces) if (t.name && S.vis[t.name] !== undefined) t.visible = S.vis[t.name];
   const showOut = !!outdoor && S.vis.outdoor === true;
-  // --- state strips (y4): mode, unit state, hold
-  for (const [label, arr] of [["mode", cs.mode], ["unit", cs.unit], ["hold", cs.hold]]) {
-    traces.push({ type: "scattergl", mode: "markers", x: cs.T, y: cs.T.map(() => label), yaxis: "y4", showlegend: false,
-      marker: { symbol: "square", size: 7, color: arr.map(catColor) }, text: arr.map((v) => `${label}: ${v ?? "–"}`), hoverinfo: "x+text" });
-  }
-  // shapes: holds and off periods, across the three plots
+  const isOn = (t) => t.visible === true || t.visible === undefined;
+
   const shapes = [], annotations = [];
-  const shade = (a, b, color) => shapes.push({ type: "rect", xref: "x", yref: "paper", x0: a, x1: b, y0: 0.12, y1: 1, fillcolor: color, line: { width: 0 }, layer: "below" });
-  for (const [a, b] of spans(cs.T, (k) => !!cs.hold[k])) shade(a, b, "rgba(224,176,64,.14)");
-  for (const [a, b] of spans(cs.T, (k) => cs.mode[k] === "off" || cs.mode[k] === "unavailable")) shade(a, b, "rgba(128,128,128,.10)");
-  if (sensor) for (const [a, b] of spans(sensor.T, (k) => sensor.v[k] == null))
-    shapes.push({ type: "rect", xref: "x", yref: "paper", x0: a, x1: b, y0: 0.42, y1: 1, fillcolor: "rgba(196,61,47,.10)", line: { width: 0 }, layer: "below" });
-  // events: target and mode changes
-  for (let k = 1; k < cs.T.length; k++) {
-    let txt = null;
-    if (cs.mode[k] !== cs.mode[k - 1]) txt = cs.mode[k];
-    else if (cs.target[k] != null && cs.target[k - 1] != null && cs.target[k] !== cs.target[k - 1]) txt = `→ ${cs.target[k]}°`;
-    if (!txt) continue;
-    shapes.push({ type: "line", xref: "x", yref: "paper", x0: cs.T[k], x1: cs.T[k], y0: 0.12, y1: 1, line: { color: C("--muted"), width: 1, dash: "dot" } });
-    annotations.push({ x: cs.T[k], y: 1, xref: "x", yref: "paper", text: esc(txt), showarrow: false, yanchor: "bottom", font: { size: 10, color: C("--muted") } });
-  }
   // integral limits of the mode in use
   const lastMode = [...cs.mode].reverse().find((m) => m === "heat" || m === "cool");
   const cfg = lastMode ? r.modes?.[lastMode] : null;
   if (cfg) for (const lim of [cfg.integral_min, cfg.integral_max])
-    shapes.push({ type: "line", xref: "paper", yref: "y3", x0: 0, x1: 1, y0: lim, y1: lim, line: { color: C("--i"), width: 1, dash: "dash" }, opacity: .5 });
+    shapes.push({ type: "line", xref: "paper", yref: "y3", x0: 0, x1: 1, y0: lim, y1: lim, line: { color: COL.i, width: 1, dash: "dash" }, opacity: .4 });
+
   const [x0, x1] = windowMs();
   // Tick labels sit inside the plot and axis titles are small labels in its corners,
-  // so the margins stay a few px wide and the plot gets the whole width (phones).
-  const narrow = $("chart").clientWidth < 700;
-  const D = { y: [0.42, 1], y3: [0.12, 0.385], y4: [0, 0.085] };
+  // so the left margin stays a few px wide and the plot gets the whole width (phones).
+  const D = { y: [0.4, 1], y3: [0, 0.34] };
+  const H = $("chart").clientHeight, M = { l: 4, r: wide ? 52 : 4, t: 16, b: 24 };
   const axis = (domain, extra = {}) => ({ domain, gridcolor: C("--line"), zerolinecolor: C("--line"), color: C("--muted"),
-    ticklabelposition: "inside", tickfont: { size: 10 }, nticks: 6, automargin: false, ...extra });
+    ticklabelposition: "inside", tickfont: { size: 10 }, nticks: 6, automargin: false, fixedrange: true, ...extra });
   const label = (text, yTop, right = false) => annotations.push({ text, xref: "paper", yref: "paper", x: right ? 1 : 0, y: yTop,
     xanchor: right ? "right" : "left", yanchor: "bottom", showarrow: false, font: { size: 10, color: C("--muted") } });
   label("°C", D.y[1]); if (showOut) label("outdoor °C", D.y[1], true);
-  label("P · I · E", D.y3[1]);
-  for (const k of ["mode", "unit", "hold"]) annotations.push({ text: k, xref: "paper", yref: "y4", x: 0, y: k, xanchor: "left",
-    showarrow: false, bgcolor: C("--panel"), borderpad: 1, font: { size: 9, color: C("--muted") } });
+  label("PID", D.y3[1]);
+
+  // Current values at the right end of the lines (wide screens), pushed apart so they don't overlap.
+  if (wide) for (const [yaxis, dom] of [["y", D.y], ["y3", D.y3]]) {
+    const ls = traces.filter((t) => t.yaxis === yaxis && t.name && t.showlegend !== false && isOn(t));
+    const all = ls.flatMap((t) => t.y.filter((v) => v != null));
+    if (!all.length) continue;
+    const lo = Math.min(...all), hi = Math.max(...all), pad = (hi - lo || 1) * 0.05;
+    const pxPer = ((dom[1] - dom[0]) * (H - M.t - M.b)) / (hi - lo + 2 * pad || 1);
+    const items = ls.map((t) => { const v = [...t.y].reverse().find((x) => x != null); return v == null ? null : { t, v, px: (v - lo + pad) * pxPer }; })
+      .filter(Boolean).sort((a, b) => a.px - b.px);
+    for (let k = 1; k < items.length; k++) items[k].px = Math.max(items[k].px, items[k - 1].px + 12);
+    for (const it of items) annotations.push({ xref: "paper", yref: yaxis, x: 1, y: it.v, xanchor: "left", showarrow: false,
+      yshift: it.px - (it.v - lo + pad) * pxPer, text: it.t.yaxis === "y" ? f1(it.v) : f2(it.v),
+      font: { size: 10, color: it.t.line.color } });
+  }
+
   const layout = {
     uirevision: `${S.room}-${S.hours}-${S.end}`,
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { color: C("--text"), size: 11 },
-    margin: { l: 4, r: 4, t: 16, b: 24 }, hovermode: "x unified", showlegend: true,
-    legend: { orientation: "h", x: 0, y: -0.03, yanchor: "top", font: { size: narrow ? 10 : 11 }, itemwidth: 30 },
-    xaxis: { type: "date", range: [new Date(x0), new Date(x1)], gridcolor: C("--line"), color: C("--muted"), anchor: "y4",
+    margin: M, hovermode: "x unified", showlegend: true,
+    legend: wide
+      ? { orientation: "v", xanchor: "left", xref: "paper", y: 1, yanchor: "top", font: { size: 11 }, tracegroupgap: 2,
+          // past the value labels
+          x: 1 + 56 / Math.max(300, $("chart").clientWidth - M.l - M.r) }
+      : { orientation: "h", x: 0, y: -0.03, yanchor: "top", font: { size: narrow ? 10 : 11 }, itemwidth: 30, tracegroupgap: 0 },
+    xaxis: { type: "date", range: [new Date(x0), new Date(x1)], gridcolor: C("--line"), color: C("--muted"), anchor: "y3",
       tickfont: { size: 10 }, nticks: narrow ? 5 : 10 },
     yaxis: axis(D.y),
     yaxis5: axis(D.y, { overlaying: "y", side: "right", showgrid: false, zeroline: false, visible: showOut }),
     yaxis3: axis(D.y3),
-    yaxis4: axis(D.y4, { type: "category", categoryorder: "array", categoryarray: ["hold", "unit", "mode"], showgrid: false, showticklabels: false }),
+    yaxis6: { overlaying: "y", range: [0, 1], visible: false, fixedrange: true },
+    yaxis7: { overlaying: "y3", range: [0, 1], visible: false, fixedrange: true },
     shapes, annotations,
   };
   Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false, displayModeBar: narrow ? false : "hover",
     modeBarButtonsToRemove: ["select2d", "lasso2d"] });
   const gd = $("chart");
-  if (!gd._visHooked) {  // remember legend clicks, and redraw so the outdoor axis follows its line
+  if (!gd._visHooked) {  // remember legend clicks; redraw so the outdoor axis and the end values follow
     gd._visHooked = true;
     gd.on("plotly_restyle", () => {
       for (const t of gd.data) if (t.name) S.vis[t.name] = t.visible ?? true;
