@@ -50,9 +50,9 @@
   .pill.bad { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
   .live { color: var(--ok); font-size: 12px; }
   .live::before { content: "●"; margin-right: 4px; }
-  /* the chart fills the viewport under the sticky header, so it fits one screen once scrolled to */
+  /* well under a screen high, legend included */
   .card.plot { padding: 4px 6px 8px; }
-  #chart { width: 100%; height: clamp(520px, calc(100vh - 80px), 1100px); height: clamp(520px, calc(100dvh - 80px), 1100px); }
+  #chart { width: 100%; height: clamp(400px, 62vh, 600px); }
   table.tune { border-collapse: collapse; font-size: 13px; }
   table.tune td, table.tune th { padding: 3px 10px 3px 0; text-align: left; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
   table.tune th { color: var(--muted); font-weight: 400; }
@@ -67,7 +67,7 @@
     .card.plot > .small { padding: 0 6px; }
     .stats { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 3px 10px; }
     .stat .v { font-size: 14px; }
-    #chart { height: clamp(520px, calc(100dvh - 16px), 900px); }
+    #chart { height: clamp(440px, 72vh, 560px); }
   }
 </style>
 </head>
@@ -354,7 +354,7 @@ function render() {
     acSet.T = acSet.T.filter((_, k) => keep[k]); acSet.v = acSet.v.filter((_, k) => keep[k]); }
   const C = (v) => css(v);
   const narrow = $("chart").clientWidth < 700;
-  const wide = $("chart").clientWidth >= 1000;  // legend on the right, values at the line ends
+  const wide = $("chart").clientWidth >= 1000;  // room for the values at the line ends
   // gl for the dense series; plain svg for steps and dashes
   const tr = (name, x, y, color, { yaxis = "y", width = 1.5, hv = false, dash, opacity, unit = " °C", hidden = false } = {}) => ({
     type: hv || dash ? "scatter" : "scattergl", mode: "lines", name, x, y, yaxis, opacity, connectgaps: false,
@@ -419,7 +419,7 @@ function render() {
   // Tick labels sit inside the plot and axis titles are small labels in its corners,
   // so the left margin stays a few px wide and the plot gets the whole width (phones).
   const D = { y: [0.4, 1], y3: [0, 0.34] };
-  const H = $("chart").clientHeight, M = { l: 4, r: wide ? 52 : 4, t: 16, b: 24 };
+  const H = $("chart").clientHeight, M = { l: 4, r: wide ? 40 : 4, t: 16, b: 34 };
   const axis = (domain, extra = {}) => ({ domain, gridcolor: C("--line"), zerolinecolor: C("--line"), color: C("--muted"),
     ticklabelposition: "inside", tickfont: { size: 10 }, nticks: 6, automargin: false, fixedrange: true, ...extra });
   const label = (text, yTop, right = false) => annotations.push({ text, xref: "paper", yref: "paper", x: right ? 1 : 0, y: yTop,
@@ -446,11 +446,8 @@ function render() {
     uirevision: `${S.room}-${S.hours}-${S.end}`,
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { color: C("--text"), size: 11 },
     margin: M, hovermode: "x unified", showlegend: true,
-    legend: wide
-      ? { orientation: "v", xanchor: "left", xref: "paper", y: 1, yanchor: "top", font: { size: 11 }, tracegroupgap: 2,
-          // past the value labels
-          x: 1 + 56 / Math.max(300, $("chart").clientWidth - M.l - M.r) }
-      : { orientation: "h", x: 0, y: -0.03, yanchor: "top", font: { size: narrow ? 10 : 11 }, itemwidth: 30, tracegroupgap: 0 },
+    // under the two-line time labels
+    legend: { orientation: "h", x: 0, y: -32 / Math.max(200, H - M.t - M.b), yanchor: "top", font: { size: narrow ? 10 : 11 }, itemwidth: 30, tracegroupgap: 0 },
     xaxis: { type: "date", range: [new Date(x0), new Date(x1)], gridcolor: C("--line"), color: C("--muted"), anchor: "y3",
       tickfont: { size: 10 }, nticks: narrow ? 5 : 10 },
     yaxis: axis(D.y),
