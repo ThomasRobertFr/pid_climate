@@ -109,7 +109,9 @@ const f2 = (v, u = "") => (v == null ? "–" : `${Number(v).toFixed(2)}${u}`);
 const pct = (v) => (v == null ? "–" : `${Math.round(v * 100)} %`);
 const dur = (s) => { if (s == null) return "–"; s = Math.round(s); if (s < 90) return `${s} s`; const m = Math.round(s / 60); return m < 90 ? `${m} min` : `${(m / 60).toFixed(1)} h`; };
 const RANGES = [[6, "6 h"], [24, "24 h"], [72, "3 d"], [168, "7 d"], [336, "14 d"], [720, "30 d"]];
-const S = { rooms: [], room: null, hours: 24, end: null, data: {}, unsub: null, seq: 0, outdoor: null };
+const S = { rooms: [], room: null, hours: 24, end: null, data: {}, unsub: null, seq: 0, outdoor: null,
+  // legend state by trace name, kept across rooms and ranges; these start hidden
+  vis: { "AC reads": "legendonly", outdoor: "legendonly" } };
 
 // The page runs in HA's iframe panel and borrows the frontend's connection and hass object.
 let connP = null;
@@ -363,17 +365,20 @@ function render() {
     { type: "scatter", mode: "lines", x: cs.T, y: band, line: { width: 0, shape: "hv" }, fill: "tonexty", fillcolor: "rgba(47,111,219,.12)", name: "target ±0.3", hoverinfo: "skip", yaxis: "y" },
     step("target", cs.T, cs.target, C("--target"), { dash: "dash", yaxis: "y" }),
     sensor ? line("room", sensor.T, sensor.v, C("--room"), { yaxis: "y" }) : line("room", cs.T, cs.room, C("--room"), { yaxis: "y" }),
+    // the unit's own thermometer reads the air at the unit: off by default, a click on the legend shows it
     line("AC reads", acRead.T, acRead.v, C("--ac"), { yaxis: "y", dash: "dot", width: 1.2 }),
-    // --- command (y2)
-    line("raw command", cs.T, cs.raw, C("--raw"), { yaxis: "y2" }),
-    step("sent", cs.T, cs.sent, C("--sent"), { yaxis: "y2" }),
-    step("AC setpoint", acSet.T, acSet.v, C("--ac"), { dash: "dot", yaxis: "y2" }),
+    // --- command, on the same °C axis: what the PID asks next to what the room does
+    line("raw command", cs.T, cs.raw, C("--raw"), { yaxis: "y" }),
+    step("sent", cs.T, cs.sent, C("--sent"), { yaxis: "y" }),
+    step("AC setpoint", acSet.T, acSet.v, C("--ac"), { dash: "dot", yaxis: "y" }),
     // --- PID terms (y3)
     line("P", cs.T, cs.p, C("--p"), { yaxis: "y3" }),
     line("I", cs.T, cs.i, C("--i"), { yaxis: "y3" }),
     line("E", cs.T, cs.e, C("--e"), { yaxis: "y3" }),
   ];
   if (outdoor) traces.push(line("outdoor", outdoor.T, outdoor.v, C("--outdoor"), { yaxis: "y5", width: 1.1 }));
+  for (const t of traces) if (t.name && S.vis[t.name] !== undefined) t.visible = S.vis[t.name];
+  const showOut = !!outdoor && S.vis.outdoor === true;
   // --- state strips (y4): mode, unit state, hold
   for (const [label, arr] of [["mode", cs.mode], ["unit", cs.unit], ["hold", cs.hold]]) {
     traces.push({ type: "scattergl", mode: "markers", x: cs.T, y: cs.T.map(() => label), yaxis: "y4", showlegend: false,
@@ -385,7 +390,7 @@ function render() {
   for (const [a, b] of spans(cs.T, (k) => !!cs.hold[k])) shade(a, b, "rgba(224,176,64,.14)");
   for (const [a, b] of spans(cs.T, (k) => cs.mode[k] === "off" || cs.mode[k] === "unavailable")) shade(a, b, "rgba(128,128,128,.10)");
   if (sensor) for (const [a, b] of spans(sensor.T, (k) => sensor.v[k] == null))
-    shapes.push({ type: "rect", xref: "x", yref: "paper", x0: a, x1: b, y0: 0.6, y1: 1, fillcolor: "rgba(196,61,47,.10)", line: { width: 0 }, layer: "below" });
+    shapes.push({ type: "rect", xref: "x", yref: "paper", x0: a, x1: b, y0: 0.42, y1: 1, fillcolor: "rgba(196,61,47,.10)", line: { width: 0 }, layer: "below" });
   // events: target and mode changes
   for (let k = 1; k < cs.T.length; k++) {
     let txt = null;
@@ -404,13 +409,13 @@ function render() {
   // Tick labels sit inside the plot and axis titles are small labels in its corners,
   // so the margins stay a few px wide and the plot gets the whole width (phones).
   const narrow = $("chart").clientWidth < 700;
-  const D = { y: [0.6, 1], y2: [0.36, 0.565], y3: [0.12, 0.325], y4: [0, 0.085] };
+  const D = { y: [0.42, 1], y3: [0.12, 0.385], y4: [0, 0.085] };
   const axis = (domain, extra = {}) => ({ domain, gridcolor: C("--line"), zerolinecolor: C("--line"), color: C("--muted"),
     ticklabelposition: "inside", tickfont: { size: 10 }, nticks: 6, automargin: false, ...extra });
   const label = (text, yTop, right = false) => annotations.push({ text, xref: "paper", yref: "paper", x: right ? 1 : 0, y: yTop,
     xanchor: right ? "right" : "left", yanchor: "bottom", showarrow: false, font: { size: 10, color: C("--muted") } });
-  label("°C", D.y[1]); if (outdoor) label("outdoor °C", D.y[1], true);
-  label("command °C", D.y2[1]); label("P · I · E", D.y3[1]);
+  label("°C", D.y[1]); if (showOut) label("outdoor °C", D.y[1], true);
+  label("P · I · E", D.y3[1]);
   for (const k of ["mode", "unit", "hold"]) annotations.push({ text: k, xref: "paper", yref: "y4", x: 0, y: k, xanchor: "left",
     showarrow: false, bgcolor: C("--panel"), borderpad: 1, font: { size: 9, color: C("--muted") } });
   const layout = {
@@ -421,14 +426,21 @@ function render() {
     xaxis: { type: "date", range: [new Date(x0), new Date(x1)], gridcolor: C("--line"), color: C("--muted"), anchor: "y4",
       tickfont: { size: 10 }, nticks: narrow ? 5 : 10 },
     yaxis: axis(D.y),
-    yaxis5: axis(D.y, { overlaying: "y", side: "right", showgrid: false, zeroline: false }),
-    yaxis2: axis(D.y2),
+    yaxis5: axis(D.y, { overlaying: "y", side: "right", showgrid: false, zeroline: false, visible: showOut }),
     yaxis3: axis(D.y3),
     yaxis4: axis(D.y4, { type: "category", categoryorder: "array", categoryarray: ["hold", "unit", "mode"], showgrid: false, showticklabels: false }),
     shapes, annotations,
   };
   Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false, displayModeBar: narrow ? false : "hover",
     modeBarButtonsToRemove: ["select2d", "lasso2d"] });
+  const gd = $("chart");
+  if (!gd._visHooked) {  // remember legend clicks, and redraw so the outdoor axis follows its line
+    gd._visHooked = true;
+    gd.on("plotly_restyle", () => {
+      for (const t of gd.data) if (t.name) S.vis[t.name] = t.visible ?? true;
+      scheduleRender();
+    });
+  }
 }
 
 // ------------------------------------------------------------------ chrome
